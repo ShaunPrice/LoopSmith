@@ -1,0 +1,19 @@
+// name: Slapback Echo
+// A feedback delay: the mixer sums the input with the delayed signal and
+// feeds the delay again. Feedback loops get one audio block of extra latency.
+AudioMixer4       dmix1;
+AudioEffectDelay  delay1;
+AudioMixer4       wet1;
+
+AudioConnection c1(fxin, 0, dmix1, 0);
+AudioConnection c2(dmix1, 0, delay1, 0);
+AudioConnection c3(delay1, 0, dmix1, 1);     // feedback path
+AudioConnection c4(fxin, 0, wet1, 1);        // dry
+AudioConnection c5(delay1, 0, wet1, 0);      // wet
+AudioConnection c6(wet1, 0, fxout, 0);
+
+delay1.delay(0, 220);
+dmix1.gain(0, 1.0);
+dmix1.gain(1, 0.35);                          // feedback amount
+wet1.gain(0, 0.5);
+wet1.gain(1, 1.0);

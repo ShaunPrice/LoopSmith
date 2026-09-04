@@ -1,0 +1,3 @@
+# LoopSmith: stable device name + user access for the Teensy pedal
+# (PJRC vendor 16c0; product id changes with the USB type, so match the vendor)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="16c0", SYMLINK+="teensy-looper", MODE="0666", TAG+="systemd"

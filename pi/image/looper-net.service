@@ -1,0 +1,14 @@
+[Unit]
+Description=LoopSmith radio roles (hotspot + home Wi-Fi profiles for NetworkManager)
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Before=NetworkManager.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/looper/pi/looper-net.py
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

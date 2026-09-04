@@ -1,0 +1,10 @@
+[Unit]
+Description=LoopSmith nightly maintenance (app update, then OS security packages)
+After=network-online.target looper-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=-/opt/looper/pi/looper-update.sh apply
+ExecStartPost=-/opt/looper/pi/looper-update.sh os
+TimeoutStartSec=3600

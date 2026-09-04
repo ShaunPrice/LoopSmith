@@ -1,0 +1,2 @@
+# LoopSmith: a MIDI controller plugged into the Pi plays the pedal
+ACTION=="add", SUBSYSTEM=="sound", KERNEL=="midiC*", RUN+="/bin/sh -c '/opt/looper/pi/midi-connect.sh &'"

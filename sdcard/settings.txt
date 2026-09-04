@@ -1,0 +1,9 @@
+// LoopSmith global audio settings (SD card root: /settings.txt)
+input(LINEIN)      // LINEIN or MIC
+lineInLevel(8)     // 0..15, higher = more sensitive (8 = 0.79 V p-p full scale, 5 = 1.33 V p-p)
+volume(0.7)        // headphone output 0..1
+inputGain(1.0)     // digital gain before the FX chain
+dryLevel(1.0)      // live signal in the output mix
+loopLevel(1.0)     // loop playback in the output mix
+usbInLevel(1.0)    // computer audio (USB) in the output mix, 1.0 = unity (L+R summed to mono)
+monoSum(1.0, 1.0)  // input L, R gains into the mono sum

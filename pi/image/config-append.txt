@@ -1,0 +1,18 @@
+
+# ===== LoopSmith companion (pi/image/config-append.txt) =====
+[all]
+# HDMI: come up on the screen even if it is switched on late (ignored by the Pi 5, harmless)
+hdmi_force_hotplug=1
+# a touch more GPU memory for the Chromium kiosk on the 1 GB Pi 3B (ignored by the Pi 5)
+gpu_mem=128
+
+# ----- Suptronics X300 (a Pi 3B board; these lines only apply on a Pi 3) -----
+# Its sound card is USB (C-Media CM119A, "USB PnP Sound Device") - nothing to
+# configure; it becomes the default ALSA device via /etc/asound.conf. The board's
+# DS3231 real-time clock keeps the time when the Pi is off the internet.
+[pi3]
+dtparam=i2c_arm=on
+dtoverlay=i2c-rtc,ds3231
+# the Pi's own headphone jack is not used (the X300 line out is)
+dtparam=audio=off
+[all]

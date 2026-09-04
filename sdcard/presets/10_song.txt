@@ -1,0 +1,73 @@
+// name: Song (guitars + bass + drums)
+// A little band inside the pedal: a four-voice rhythm guitar on channel 1, a
+// two-voice lead guitar on channel 2, a bass on channel 3 and a kit on channel
+// 10. Plucked strings are Karplus-Strong models; the drums are SimpleDrum.
+AudioSynthKarplusStrong gtr1;
+AudioSynthKarplusStrong gtr2;
+AudioSynthKarplusStrong gtr3;
+AudioSynthKarplusStrong gtr4;
+AudioSynthKarplusStrong lead1;
+AudioSynthKarplusStrong lead2;
+AudioSynthKarplusStrong bass1;
+AudioSynthSimpleDrum    kick;
+AudioSynthSimpleDrum    snare;
+AudioSynthSimpleDrum    hat;
+AudioMixer4             gtrmix;
+AudioMixer4             band;
+AudioMixer4             kit1;
+AudioEffectFreeverb     verb1;
+AudioMixer4             wet1;
+
+AudioConnection c1(gtr1, 0, gtrmix, 0);
+AudioConnection c2(gtr2, 0, gtrmix, 1);
+AudioConnection c3(gtr3, 0, gtrmix, 2);
+AudioConnection c4(gtr4, 0, gtrmix, 3);
+AudioConnection c5(lead1, 0, band, 0);
+AudioConnection c6(lead2, 0, band, 1);
+AudioConnection c7(bass1, 0, band, 2);
+AudioConnection c8(gtrmix, 0, band, 3);
+AudioConnection c9(kick, 0, kit1, 0);
+AudioConnection c10(snare, 0, kit1, 1);
+AudioConnection c11(hat, 0, kit1, 2);
+AudioConnection c12(band, 0, verb1, 0);
+AudioConnection c13(verb1, 0, wet1, 0);
+AudioConnection c14(band, 0, wet1, 1);
+AudioConnection c15(kit1, 0, wet1, 2);
+AudioConnection c16(fxin, 0, wet1, 3);
+AudioConnection c17(wet1, 0, fxout, 0);
+
+gtr1.midi(1, g1);
+gtr2.midi(1, g2);
+gtr3.midi(1, g3);
+gtr4.midi(1, g4);
+lead1.midi(2, l1);
+lead2.midi(2, l2);
+bass1.midi(3, b1);
+kick.frequency(55);
+kick.length(320);
+kick.pitchMod(0.7);
+snare.frequency(190);
+snare.length(160);
+snare.secondMix(0.6);
+hat.frequency(900);
+hat.length(50);
+kick.midi(10, kick, 36);
+snare.midi(10, snare, 38);
+hat.midi(10, hat, 42);
+gtrmix.gain(0, 0.28);
+gtrmix.gain(1, 0.28);
+gtrmix.gain(2, 0.28);
+gtrmix.gain(3, 0.28);
+band.gain(0, 0.4);
+band.gain(1, 0.4);
+band.gain(2, 0.5);
+band.gain(3, 0.55);
+kit1.gain(0, 0.6);
+kit1.gain(1, 0.4);
+kit1.gain(2, 0.2);
+verb1.roomsize(0.6);
+verb1.damping(0.45);
+wet1.gain(0, 0.25);
+wet1.gain(1, 0.8);
+wet1.gain(2, 0.6);
+wet1.gain(3, 1.0);

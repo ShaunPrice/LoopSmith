@@ -1,0 +1,53 @@
+// name: Band (pluck + drums + guitar)
+// Three plucked-string voices on channel 1, a drum kit on channel 10, and the
+// guitar, with reverb on the strings and guitar. Loop a beat, lay down a riff.
+AudioSynthKarplusStrong pluck1;
+AudioSynthKarplusStrong pluck2;
+AudioSynthKarplusStrong pluck3;
+AudioSynthSimpleDrum    kick;
+AudioSynthSimpleDrum    snare;
+AudioSynthSimpleDrum    hat;
+AudioMixer4             kit1;
+AudioMixer4             src1;
+AudioEffectFreeverb     verb1;
+AudioMixer4             wet1;
+
+AudioConnection c1(kick, 0, kit1, 0);
+AudioConnection c2(snare, 0, kit1, 1);
+AudioConnection c3(hat, 0, kit1, 2);
+AudioConnection c4(fxin, 0, src1, 0);
+AudioConnection c5(pluck1, 0, src1, 1);
+AudioConnection c6(pluck2, 0, src1, 2);
+AudioConnection c7(pluck3, 0, src1, 3);
+AudioConnection c8(src1, 0, verb1, 0);
+AudioConnection c9(src1, 0, wet1, 1);
+AudioConnection c10(verb1, 0, wet1, 0);
+AudioConnection c11(kit1, 0, wet1, 2);
+AudioConnection c12(wet1, 0, fxout, 0);
+
+pluck1.midi(1, v1);
+pluck2.midi(1, v2);
+pluck3.midi(1, v3);
+kick.frequency(60);
+kick.length(300);
+kick.pitchMod(0.6);
+snare.frequency(180);
+snare.length(150);
+snare.secondMix(0.5);
+hat.frequency(800);
+hat.length(60);
+kick.midi(10, kick, 36);
+snare.midi(10, snare, 38);
+hat.midi(10, hat, 42);
+kit1.gain(0, 0.7);
+kit1.gain(1, 0.5);
+kit1.gain(2, 0.3);
+src1.gain(0, 1.0);
+src1.gain(1, 0.4);
+src1.gain(2, 0.4);
+src1.gain(3, 0.4);
+verb1.roomsize(0.55);
+verb1.damping(0.5);
+wet1.gain(0, 0.3);
+wet1.gain(1, 1.0);
+wet1.gain(2, 0.8);

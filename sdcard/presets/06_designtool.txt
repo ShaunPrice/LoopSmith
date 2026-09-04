@@ -1,0 +1,25 @@
+// name: Design Tool Demo
+// A patch pasted straight from the Teensy Audio System Design Tool
+// (https://www.pjrc.com/teensy/gui/). The declared input/output objects become
+// aliases for fxin/fxout, and the codec object is ignored — so exports load
+// as-is. Parameter lines below were added by hand.
+
+// GUItool: begin automatically generated code
+AudioInputI2S            i2s2;           //xy=173,325
+AudioEffectChorus        chorus1;        //xy=621,207
+AudioEffectFreeverb      freeverb1;      //xy=630,280
+AudioMixer4              mixer1;         //xy=868,239
+AudioOutputI2S           i2s1;           //xy=1096,300
+AudioConnection          patchCord1(i2s2, 0, chorus1, 0);
+AudioConnection          patchCord2(i2s2, 0, freeverb1, 0);
+AudioConnection          patchCord4(chorus1, 0, mixer1, 0);
+AudioConnection          patchCord6(freeverb1, 0, mixer1, 3);
+AudioConnection          patchCord7(mixer1, 0, i2s1, 0);
+AudioControlSGTL5000     sgtl5000_1;     //xy=648,57
+// GUItool: end automatically generated code
+
+chorus1.begin(2);
+freeverb1.roomsize(0.8);
+freeverb1.damping(0.3);
+mixer1.gain(0, 0.7);
+mixer1.gain(3, 0.4);

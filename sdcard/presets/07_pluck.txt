@@ -1,0 +1,31 @@
+// name: Pluck Synth + Guitar
+// Three plucked-string voices (MIDI channel 1, three-note polyphony) mixed with
+// the guitar, then a touch of reverb. Play them from a MIDI keyboard, the Studio
+// dashboard's keys, or `note on 64 100 1` on the console.
+AudioSynthKarplusStrong pluck1;
+AudioSynthKarplusStrong pluck2;
+AudioSynthKarplusStrong pluck3;
+AudioMixer4             src1;
+AudioEffectFreeverb     verb1;
+AudioMixer4             wet1;
+
+AudioConnection c1(fxin, 0, src1, 0);        // guitar
+AudioConnection c2(pluck1, 0, src1, 1);
+AudioConnection c3(pluck2, 0, src1, 2);
+AudioConnection c4(pluck3, 0, src1, 3);
+AudioConnection c5(src1, 0, verb1, 0);
+AudioConnection c6(src1, 0, wet1, 1);        // dry
+AudioConnection c7(verb1, 0, wet1, 0);       // wet
+AudioConnection c8(wet1, 0, fxout, 0);
+
+pluck1.midi(1, v1);
+pluck2.midi(1, v2);
+pluck3.midi(1, v3);
+src1.gain(0, 1.0);
+src1.gain(1, 0.7);
+src1.gain(2, 0.7);
+src1.gain(3, 0.7);
+verb1.roomsize(0.6);
+verb1.damping(0.5);
+wet1.gain(0, 0.35);
+wet1.gain(1, 1.0);

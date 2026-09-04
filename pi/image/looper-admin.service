@@ -1,0 +1,7 @@
+[Unit]
+Description=LoopSmith privileged setup action (password, hotspot, bluetooth)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/looper/pi/looper-admin.sh
+TimeoutStartSec=120

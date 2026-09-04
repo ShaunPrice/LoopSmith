@@ -1,0 +1,25 @@
+// name: Lo-Fi Wobble
+// Bitcrusher into a resonant low-pass, with an LFO tremolo built from
+// sine + DC into a multiplier.
+AudioEffectBitcrusher     crush1;
+AudioFilterStateVariable  filter1;
+AudioSynthWaveformSine    lfo1;
+AudioSynthWaveformDc      dc1;
+AudioMixer4               lfomix1;
+AudioEffectMultiply       trem1;
+
+AudioConnection c1(fxin, 0, crush1, 0);
+AudioConnection c2(crush1, 0, filter1, 0);
+AudioConnection c3(filter1, 0, trem1, 0);    // filter output 0 = low-pass
+AudioConnection c4(lfo1, 0, lfomix1, 0);
+AudioConnection c5(dc1, 0, lfomix1, 1);
+AudioConnection c6(lfomix1, 0, trem1, 1);
+AudioConnection c7(trem1, 0, fxout, 0);
+
+crush1.bits(10);
+crush1.sampleRate(12000);
+filter1.frequency(1800);
+filter1.resonance(1.1);
+lfo1.frequency(5);
+lfo1.amplitude(0.35);
+dc1.amplitude(0.65);

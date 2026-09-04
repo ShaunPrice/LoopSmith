@@ -1,0 +1,9 @@
+[Unit]
+Description=LoopSmith companion app update
+After=network-online.target looper-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/looper/pi/looper-update.sh apply
+TimeoutStartSec=1800

@@ -1,0 +1,17 @@
+/* LoopSmith: the bridge (user looper) may manage Wi-Fi and restart/shut down the Pi */
+polkit.addRule(function(action, subject) {
+  if (subject.isInGroup("netdev") && action.id.indexOf("org.freedesktop.NetworkManager.") == 0)
+    return polkit.Result.YES;
+  if (subject.user == "looper" &&
+      (action.id.indexOf("org.freedesktop.login1.reboot") == 0 ||
+       action.id.indexOf("org.freedesktop.login1.power-off") == 0))
+    return polkit.Result.YES;
+  /* the bridge may start the updater (and only that unit): it runs as root under systemd,
+     so the bridge itself keeps NoNewPrivileges and never gains privileges of its own */
+  if (subject.user == "looper" &&
+      action.id == "org.freedesktop.systemd1.manage-units" &&
+      (action.lookup("unit") == "looper-update.service" ||
+       action.lookup("unit") == "looper-admin.service") &&
+      (action.lookup("verb") == "start" || action.lookup("verb") == "restart"))
+    return polkit.Result.YES;
+});

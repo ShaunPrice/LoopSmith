@@ -1,0 +1,15 @@
+[Unit]
+Description=LoopSmith first-internet provisioning (installs the HDMI kiosk browser)
+After=network-online.target looper-net.service
+Wants=network-online.target
+ConditionPathExists=!/var/lib/looper/provisioned
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/opt/looper/pi/provision.sh
+Restart=on-failure
+RestartSec=300
+
+[Install]
+WantedBy=multi-user.target

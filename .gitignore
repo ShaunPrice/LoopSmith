@@ -1,0 +1,8 @@
+# build output
+firmware/.pio/
+dist/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

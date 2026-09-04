@@ -1,0 +1,14 @@
+// name: Crunch Drive
+// tanh waveshaper drive, tamed with a low-pass, levelled with an amp.
+AudioEffectWaveshaper  drive1;
+AudioFilterBiquad      tone1;
+AudioAmplifier         level1;
+
+AudioConnection c1(fxin, 0, drive1, 0);
+AudioConnection c2(drive1, 0, tone1, 0);
+AudioConnection c3(tone1, 0, level1, 0);
+AudioConnection c4(level1, 0, fxout, 0);
+
+drive1.drive(4.5);
+tone1.setLowpass(0, 3800, 0.71);
+level1.gain(0.8);

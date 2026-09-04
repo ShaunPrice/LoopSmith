@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=LoopSmith
+Description=The pedal's own boot splash
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/looper
+ScriptFile=/usr/share/plymouth/themes/looper/looper.script

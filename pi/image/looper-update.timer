@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for LoopSmith updates daily
+
+[Timer]
+Unit=looper-maintenance.service
+OnCalendar=*-*-* 04:30
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

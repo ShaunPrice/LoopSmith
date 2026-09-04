@@ -1,0 +1,50 @@
+# LoopSmith boot splash: the mark, centred on the pedal's own dark ground, with a
+# quiet progress bar. Kernel chatter is moved off this console by cmdline.txt, so the
+# screen shows this until the Studio kiosk takes over.
+
+Window.SetBackgroundTopColor(0.059, 0.066, 0.082);
+Window.SetBackgroundBottomColor(0.059, 0.066, 0.082);
+
+logo.image  = Image("splash.png");
+logo.sprite = Sprite(logo.image);
+logo.x = Window.GetWidth()  / 2 - logo.image.GetWidth()  / 2;
+logo.y = Window.GetHeight() / 2 - logo.image.GetHeight() / 2 - 30;
+logo.sprite.SetPosition(logo.x, logo.y, 0);
+
+bg.image  = Image("bar-bg.png");
+bg.sprite = Sprite(bg.image);
+bar.x = Window.GetWidth() / 2 - bg.image.GetWidth() / 2;
+bar.y = logo.y + logo.image.GetHeight() + 40;
+bg.sprite.SetPosition(bar.x, bar.y, 1);
+
+fill.image = Image("bar-fill.png");
+fill.width = fill.image.GetWidth();
+
+fun refresh_cb() {
+    # a gentle sweep while there is no real progress to report
+    time = time + 0.02;
+    frac = (Math.Sin(time * 1.6) + 1) / 2;
+    piece = fill.image.Scale(Math.Int(fill.width * (0.15 + 0.85 * frac)) + 1, fill.image.GetHeight());
+    fill.sprite = Sprite(piece);
+    fill.sprite.SetPosition(bar.x, bar.y, 2);
+}
+time = 0;
+Plymouth.SetRefreshFunction(refresh_cb);
+
+fun progress_cb(duration, progress) {
+    piece = fill.image.Scale(Math.Int(fill.width * progress) + 1, fill.image.GetHeight());
+    fill.sprite = Sprite(piece);
+    fill.sprite.SetPosition(bar.x, bar.y, 2);
+}
+Plymouth.SetBootProgressFunction(progress_cb);
+
+# fsck / service messages, kept small and out of the way
+message.sprite = Sprite();
+message.sprite.SetPosition(0, Window.GetHeight() - 60, 5);
+fun message_cb(text) {
+    image = Image.Text(text, 0.55, 0.58, 0.65, 1, "Sans 12");
+    message.sprite.SetImage(image);
+    message.sprite.SetX(Window.GetWidth() / 2 - image.GetWidth() / 2);
+}
+Plymouth.SetMessageFunction(message_cb);
+Plymouth.SetUpdateStatusFunction(message_cb);

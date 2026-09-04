@@ -1,0 +1,3 @@
+// name: Clean
+// The simplest possible patch: wire the chain input straight to the output.
+AudioConnection c1(fxin, 0, fxout, 0);

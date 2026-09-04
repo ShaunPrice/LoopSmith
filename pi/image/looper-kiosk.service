@@ -1,0 +1,29 @@
+[Unit]
+Description=LoopSmith kiosk (the Studio full-screen on the HDMI display)
+After=looper-bridge.service systemd-user-sessions.service
+Wants=looper-bridge.service
+Conflicts=getty@tty1.service
+ConditionPathExists=/usr/bin/cage
+StartLimitIntervalSec=0
+
+[Service]
+User=looper
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+Environment=XDG_SESSION_TYPE=wayland
+Environment=WLR_LIBINPUT_NO_DEVICES=1
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -sf -o /dev/null http://127.0.0.1/api/status && exit 0; sleep 1; done; exit 0'
+ExecStart=/opt/looper/pi/kiosk.sh
+Restart=always
+RestartSec=5
+# the browser yields to the audio route and the bridge
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

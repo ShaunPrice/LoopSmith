@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0f1115">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<title>LoopSmith · Network &amp; storage</title>
+<style>
+:root{--bg:#0f1115;--panel:#171a21;--card:#1d212b;--border:#262b36;--text:#e6e8ee;--muted:#8a90a0;--accent:#ffb454;--teal:#2dd4bf;--red:#ff453a;--radius:10px;
+--font:-apple-system,"Segoe UI",Inter,Roboto,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 var(--font)}
+header{display:flex;align-items:center;gap:12px;padding:14px 18px;background:var(--panel);border-bottom:1px solid var(--border);position:sticky;top:0}
+header img{width:34px;height:34px;border-radius:8px}header h1{font-size:17px;margin:0;font-weight:600}header a{margin-left:auto;color:var(--accent);text-decoration:none;font-weight:600}
+main{max-width:720px;margin:0 auto;padding:16px;display:grid;gap:14px}
+section{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px}
+h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 10px;display:flex;align-items:center;gap:8px}
+.dot{width:9px;height:9px;border-radius:50%;background:#555;display:inline-block}.dot.on{background:var(--teal);box-shadow:0 0 8px var(--teal)}.dot.warn{background:var(--accent)}
+.row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-top:1px solid var(--border)}.row:first-of-type{border-top:0}
+.row span:last-child{font-family:var(--mono);color:var(--text);text-align:right;word-break:break-all}.row span:first-child{color:var(--muted)}
+button{background:var(--panel);border:1px solid var(--border);color:var(--text);padding:9px 14px;border-radius:8px;font:inherit;cursor:pointer}
+button.primary{background:var(--accent);color:#1a1200;border-color:var(--accent);font-weight:600}
+#bt-list td:first-child b{display:block}#bt-list td small{color:var(--muted);font-family:var(--mono);font-size:11px}
+.pill{font-size:11px;border:1px solid var(--border);border-radius:999px;padding:1px 7px;color:var(--muted);margin-left:6px}
+.pill.on{color:var(--teal);border-color:var(--teal)}button.danger{border-color:var(--red);color:var(--red)}
+button:disabled{opacity:.5;cursor:default}
+input,select{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:9px 10px;border-radius:8px;font:inherit;width:100%}
+form{display:grid;gap:10px;margin-top:8px}form[hidden],[hidden]{display:none!important}label{font-size:13px;color:var(--muted);display:grid;gap:4px}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.msg{font-size:13px;color:var(--muted);margin-top:8px;min-height:1.2em}.msg.err{color:var(--red)}.msg.ok{color:var(--teal)}
+.nets{display:grid;gap:4px;margin:6px 0;max-height:220px;overflow:auto}.nets button{display:flex;justify-content:space-between;text-align:left}
+.nets small{color:var(--muted);font-family:var(--mono)}
+table{width:100%;border-collapse:collapse;font-size:14px}td{padding:6px 0;border-top:1px solid var(--border)}td:last-child{text-align:right;white-space:nowrap}td a{color:var(--accent);text-decoration:none;margin-left:10px}
+.big{font-size:22px;font-family:var(--mono);color:var(--accent)}
+</style>
+</head>
+<body>
+<header><img src="/icon-192.png" alt=""><h1>Network &amp; storage</h1><a href="/">Open Studio →</a></header>
+<main>
+<section id="hotspot">
+  <h2><span class="dot" id="hs-dot"></span>Setup Wi-Fi</h2>
+  <div class="row"><span>Network name</span><span id="hs-name">…</span></div>
+  <div class="row"><span>Password</span><span id="hs-pw">…</span></div>
+  <div class="row"><span>App on it</span><span><span class="big" id="hs-url">…</span></span></div>
+  <div class="msg" id="hs-msg">This network exists only until the pedal has joined yours. Join it from a
+    phone, open the address above, and set up the home Wi-Fi below — the setup network then switches
+    off and stays off.</div>
+</section>
+<section id="home">
+  <h2><span class="dot" id="home-dot"></span>Home Wi-Fi</h2>
+  <div class="row"><span>Connected to</span><span id="home-ssid">…</span></div>
+  <div class="row"><span>Address on that network</span><span id="home-ip">…</span></div>
+  <div class="row"><span>Internet</span><span id="internet">…</span></div>
+  <div class="actions"><button id="scan">Scan for networks</button><button id="forget" class="danger">Forget home Wi-Fi</button></div>
+  <div class="nets" id="nets"></div>
+  <form id="join">
+    <label>Network name (SSID)<input id="ssid" autocomplete="off" required maxlength="32"></label>
+    <label>Password<input id="pass" type="password" autocomplete="off" placeholder="leave empty for an open network"></label>
+    <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="hidden" style="width:auto">Hidden network</label>
+    <div class="actions"><button class="primary" type="submit" id="joinbtn">Join</button></div>
+  </form>
+  <div class="msg" id="home-msg"></div>
+</section>
+<section id="storage">
+  <h2><span class="dot" id="st-dot"></span>USB drive</h2>
+  <div class="row"><span>Status</span><span id="st-status">…</span></div>
+  <div class="row"><span>Free</span><span id="st-free">…</span></div>
+  <table id="files"></table>
+  <div class="msg">Loops and recordings saved on the USB drive live in <b>loops/</b>. Tap a file to download it to this device.</div>
+</section>
+<section id="bt">
+  <h2><span class="dot" id="bt-dot"></span>Bluetooth</h2>
+  <div class="msg">Pair a mouse, keyboard or game controller with the pedal computer — handy with the screen, and no cable in the way.</div>
+  <div class="actions"><button id="bt-scan">Scan for devices</button></div>
+  <table id="bt-list"></table>
+  <div class="msg" id="bt-msg"></div>
+</section>
+<section id="access">
+  <h2><span class="dot" id="acc-dot"></span>Access</h2>
+  <div class="row"><span>Web login</span><span id="acc-web">…</span></div>
+  <div class="row"><span>SSH</span><span id="acc-ssh">…</span></div>
+  <div class="actions">
+    <button id="ssh-toggle">Turn SSH off</button>
+    <button id="signout">Sign out of this browser</button>
+  </div>
+  <div class="msg" id="acc-msg">The pedal's own screen never asks to sign in; every other device does, with the login below. SSH is the command-line way in — turn it off if you do not use it.</div>
+</section>
+<section id="software">
+  <h2><span class="dot on"></span>Software</h2>
+  <div class="row"><span>Installed</span><span id="sw-ver">…</span></div>
+  <div class="row"><span>Updates</span><span id="sw-upd">—</span></div>
+  <div class="actions">
+    <button id="sw-check">Check for updates</button>
+    <button id="sw-upload">Upload a bundle…</button>
+    <input type="file" id="sw-file" accept=".gz,.tgz,application/gzip" hidden>
+    <button id="sw-apply" class="primary" hidden>Install</button>
+  </div>
+  <div class="msg" id="sw-msg">Updates come from a bundle you upload here or drop on the USB drive, or are fetched from the address set in <b>looper.conf</b>. Security patches for the operating system are applied on their own overnight.</div>
+</section>
+<section id="login">
+  <h2><span class="dot on"></span>Login</h2>
+  <div class="row"><span>User name</span><span id="login-user">…</span></div>
+  <form id="pw-form">
+    <label id="cur-wrap">Current password<input id="pw0" type="password" autocomplete="current-password"></label>
+    <label>New password<input id="pw1" type="password" autocomplete="new-password" minlength="8" placeholder="at least 8 characters"></label>
+    <label>Repeat it<input id="pw2" type="password" autocomplete="new-password"></label>
+    <div class="actions"><button class="primary" type="submit">Change password</button></div>
+  </form>
+  <div id="recovery" hidden>
+    <div class="msg">You are at the pedal itself, so you can recover the account without the old password.</div>
+    <div class="actions"><button id="reset-login" class="danger">Reset the login</button></div>
+  </div>
+  <div class="msg" id="login-msg">One password covers the web app, the console and SSH. Away from the
+    pedal you must know the current one; at the pedal's own screen you can always reset it.</div>
+</section>
+<section id="system">
+  <h2><span class="dot on"></span>This pedal computer</h2>
+  <div class="row"><span>Hostname</span><span id="host">…</span></div>
+  <div class="row"><span>Pedal (USB)</span><span id="pedal">…</span></div>
+  <div class="row"><span>Screen shows</span><span id="sys-vt">…</span></div>
+  <div class="actions">
+    <button id="console-btn">Show console on the screen</button>
+    <button id="reboot">Restart</button><button id="off" class="danger">Shut down</button>
+  </div>
+  <div class="msg" id="sys-msg"></div>
+</section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const j = (u, o) => fetch(u, o).then(r => r.json());
+const dot = (id, on, warn) => { const d = $(id); d.className = 'dot' + (on ? ' on' : warn ? ' warn' : ''); };
+async function refresh() {
+  try {
+    const st = await j('/api/status');
+    $('recovery').hidden = !st.local;
+    $('cur-wrap').hidden = !!st.local;
+    $('acc-web').textContent = st.web_auth ? 'required off the pedal\u2019s screen' : 'off — anyone on the network can open it';
+    $('host').textContent = st.hostname || '—';
+    $('pedal').textContent = st.pedal ? 'connected on ' + st.port : 'not connected';
+    const s = st.storage || {};
+    dot('st-dot', s.mounted);
+    $('st-status').textContent = s.mounted ? 'mounted at ' + s.path : 'no drive detected';
+    $('st-free').textContent = s.mounted ? `${(s.free_mb/1024).toFixed(1)} GB of ${(s.total_mb/1024).toFixed(1)} GB` : '—';
+  } catch (e) {}
+  try {
+    const n = await j('/api/network');
+    if (!n.available) { $('home-msg').textContent = 'NetworkManager is not available on this machine (development bridge).'; }
+    dot('hs-dot', n.hotspot.up, !!n.hotspot.iface);
+    const hsOn = n.hotspot.enabled !== false;
+    $('login-user').textContent = n.login || 'looper';
+    $('hs-name').textContent = (n.hotspot.ssid || '—') + (hsOn ? '' : '  (off — the pedal has joined a network)');
+    $('hs-pw').textContent = n.hotspot.password || '—';
+    $('hs-url').textContent = n.hotspot.ip ? 'http://' + n.hotspot.ip + '/' : '—';
+    dot('home-dot', n.home.up);
+    $('home-ssid').textContent = n.home.up ? n.home.ssid : 'not connected';
+    $('home-ip').textContent = n.home.ip ? 'http://' + n.home.ip + '/' : '—';
+    $('internet').textContent = n.internet ? 'reachable — shared to the hotspot' : 'no';
+    const ssh = n.ssh || {};
+    sshOn = !!ssh.enabled;
+    $('acc-ssh').textContent = ssh.enabled ? (ssh.active ? 'on' : 'enabled (not running)') : 'off';
+    const vt = n.vt || '';
+    onConsole = !!vt && vt !== 'tty1';
+    $('sys-vt').textContent = vt ? (onConsole ? `text console (${vt})` : 'Studio') : '—';
+    $('console-btn').textContent = onConsole ? 'Back to Studio' : 'Show console on the screen';
+    $('console-btn').title = onConsole
+      ? 'Return the HDMI screen to the Studio kiosk (Ctrl+Alt+F1 does the same)'
+      : 'Switch the HDMI screen to a login console — nothing restarts, the pedal keeps playing (Ctrl+Alt+F2)';
+    $('ssh-toggle').textContent = sshOn ? 'Turn SSH off' : 'Turn SSH on';
+    document.getElementById('acc-dot').className = 'dot' + (sshOn ? ' warn' : ' on');
+  } catch (e) {}
+  try {
+    const l = await j('/library/');
+    const t = $('files'); t.innerHTML = '';
+    for (const f of l.files || []) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${f.name}</td><td>${(f.bytes/1048576).toFixed(2)} MB <a href="/library/${encodeURIComponent(f.name)}" download>download</a><a href="#" data-del="${f.name}">delete</a></td>`;
+      t.appendChild(tr);
+    }
+  } catch (e) {}
+}
+$('files').addEventListener('click', async e => {
+  const n = e.target.dataset.del; if (!n) return; e.preventDefault();
+  if (!confirm(`Delete ${n} from the USB drive?`)) return;
+  await fetch('/library/' + encodeURIComponent(n), { method: 'DELETE' }); refresh();
+});
+$('scan').onclick = async () => {
+  $('scan').disabled = true; $('home-msg').className = 'msg'; $('home-msg').textContent = 'Scanning…';
+  try {
+    const r = await j('/api/network/scan');
+    const box = $('nets'); box.innerHTML = '';
+    for (const n of r.networks) {
+      const b = document.createElement('button'); b.type = 'button';
+      b.innerHTML = `<span>${n.ssid}</span><small>${n.signal}%  ${n.security}</small>`;
+      b.onclick = () => { $('ssid').value = n.ssid; $('pass').focus(); };
+      box.appendChild(b);
+    }
+    $('home-msg').textContent = r.networks.length ? `${r.networks.length} networks found — pick one` : 'No networks found';
+  } catch (e) { $('home-msg').className = 'msg err'; $('home-msg').textContent = 'Scan failed'; }
+  $('scan').disabled = false;
+};
+$('join').onsubmit = async e => {
+  e.preventDefault(); $('joinbtn').disabled = true; $('home-msg').className = 'msg'; $('home-msg').textContent = 'Joining… this can take 20 seconds';
+  try {
+    const r = await j('/api/network/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ssid: $('ssid').value.trim(), password: $('pass').value, hidden: $('hidden').checked }) });
+    $('home-msg').className = 'msg ' + (r.ok ? 'ok' : 'err');
+    $('home-msg').textContent = r.ok ? 'Connected — the pedal is at http://' + r.message + '/ on that network' : 'Failed: ' + r.message;
+  } catch (e) { $('home-msg').className = 'msg err'; $('home-msg').textContent = 'Request failed'; }
+  $('joinbtn').disabled = false; refresh();
+};
+$('forget').onclick = async () => { if (!confirm('Forget the saved home Wi-Fi?')) return; await j('/api/network/forget', { method: 'POST' }); refresh(); };
+$('reboot').onclick = async () => { if (!confirm('Restart the pedal computer?')) return; const r = await j('/api/system/reboot', { method: 'POST' }); $('sys-msg').textContent = r.ok ? 'Restarting… back in about a minute' : 'Failed: ' + r.message; };
+$('off').onclick = async () => { if (!confirm('Shut down the pedal computer? Power-cycle it to start again.')) return; const r = await j('/api/system/poweroff', { method: 'POST' }); $('sys-msg').textContent = r.ok ? 'Shutting down' : 'Failed: ' + r.message; };
+/* ---------------- software updates ---------------- */
+const post = (u, b) => fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) }).then(r => r.json());
+async function swRefresh() {
+  try {
+    const st = await j('/api/update/status');
+    $('sw-ver').textContent = st.version ? 'v' + st.version : '—';
+    let t = st.busy ? 'installing…' : (st.message || (st.available ? `v${st.latest} available (${st.source})` : (st.detail || 'press check')));
+    if (st.os_reboot_required) t += ' · system updates need a restart';
+    $('sw-upd').textContent = t;
+    $('sw-apply').hidden = !(st.available && !st.busy);
+    $('sw-apply').textContent = st.latest ? `Install v${st.latest}` : 'Install';
+    $('sw-check').disabled = !!st.busy;
+  } catch (e) {}
+}
+$('sw-check').onclick = async () => { $('sw-check').disabled = true; $('sw-upd').textContent = 'checking…'; try { await post('/api/update/check'); } catch (e) {} $('sw-check').disabled = false; swRefresh(); };
+$('sw-upload').onclick = () => $('sw-file').click();
+$('sw-file').onchange = async ev => {
+  const f = ev.target.files[0]; ev.target.value = '';
+  if (!f) return;
+  $('sw-upd').textContent = `uploading ${f.name}…`;
+  try {
+    const r = await fetch('/api/update/upload', { method: 'POST', body: await f.arrayBuffer() });
+    const jj = await r.json().catch(() => ({}));
+    $('sw-upd').textContent = jj.message || (jj.ok ? 'uploaded' : 'upload failed');
+  } catch (e) { $('sw-upd').textContent = 'upload failed'; }
+  swRefresh();
+};
+$('sw-apply').onclick = async () => {
+  if (!confirm('Install the update?\n\nThe editor reconnects by itself; the pedal keeps playing.')) return;
+  $('sw-apply').disabled = true;
+  const r = await post('/api/update/apply');
+  $('sw-upd').textContent = r.ok ? 'installing…' : (r.message || 'refused');
+  setTimeout(swRefresh, 3000);
+};
+
+/* ---------------- login ---------------- */
+$('pw-form').onsubmit = async e => {
+  e.preventDefault();
+  const a = $('pw1').value, b = $('pw2').value;
+  if (a !== b) { $('login-msg').className = 'msg err'; $('login-msg').textContent = 'The two passwords are different.'; return; }
+  if (a.length < 8) { $('login-msg').className = 'msg err'; $('login-msg').textContent = 'Use at least 8 characters.'; return; }
+  $('login-msg').className = 'msg'; $('login-msg').textContent = 'Changing…';
+  const r = await post('/api/admin/set-password', { password: a, current: $('pw0').value });
+  $('login-msg').className = 'msg ' + (r.ok ? 'ok' : 'err');
+  $('login-msg').textContent = r.message || (r.ok ? 'changed' : 'failed');
+  if (r.ok) { $('pw1').value = ''; $('pw2').value = ''; }
+};
+$('reset-login').onclick = async () => {
+  if (!confirm('Clear the login?\n\nThe screen will ask you to choose a new user name and password, as it did when the pedal was new.')) return;
+  const r = await post('/api/admin/reset-login', {});
+  $('login-msg').className = 'msg ' + (r.ok ? 'ok' : 'err');
+  $('login-msg').textContent = r.message || '';
+  if (r.ok) setTimeout(() => location.href = '/claim', 2500);
+};
+$('user-form') && ($('user-form').onsubmit = async e => {
+  e.preventDefault();
+  const n = $('newuser').value.trim();
+  if (!n) return;
+  if (!confirm(`Rename the account to "${n}" and restart the pedal computer?\n\nAfter the restart, log in as ${n} with the same password.`)) return;
+  const r = await post('/api/admin/set-username', { username: n, current: $('pw0').value });
+  $('login-msg').className = 'msg ' + (r.ok ? 'ok' : 'err');
+  $('login-msg').textContent = r.message || '';
+});
+
+/* ---------------- bluetooth ---------------- */
+async function btAction(action, mac, label) {
+  $('bt-msg').className = 'msg'; $('bt-msg').textContent = label + '…';
+  const r = await post('/api/admin/' + action, { mac });
+  $('bt-msg').className = 'msg ' + (r.ok ? 'ok' : 'err');
+  $('bt-msg').textContent = r.message || (r.ok ? 'done' : 'failed');
+  btScan(true);
+}
+async function btScan(quiet) {
+  const b = $('bt-scan'); b.disabled = true;
+  if (!quiet) { $('bt-msg').className = 'msg'; $('bt-msg').textContent = 'Scanning for about 12 seconds — put the device in pairing mode now…'; }
+  try {
+    const r = await post('/api/admin/bt-scan');
+    const list = (r.data && r.data.devices) || [];
+    const t = $('bt-list'); t.innerHTML = '';
+    for (const d of list) {
+      const tr = document.createElement('tr');
+      const icon = /keyboard/.test(d.icon) ? '⌨' : /mouse|pointing/.test(d.icon) ? '🖱' : /audio|headset/.test(d.icon) ? '🎧' : /gaming/.test(d.icon) ? '🎮' : '•';
+      const td1 = document.createElement('td');
+      td1.innerHTML = `<b>${icon} ${d.name}</b><small>${d.mac}</small>`;
+      if (d.connected) td1.querySelector('b').insertAdjacentHTML('beforeend', '<span class="pill on">connected</span>');
+      else if (d.paired) td1.querySelector('b').insertAdjacentHTML('beforeend', '<span class="pill">paired</span>');
+      const td2 = document.createElement('td');
+      const mk = (label, act, cls) => { const bb = document.createElement('button'); bb.textContent = label; if (cls) bb.className = cls; bb.style.marginLeft = '6px'; bb.onclick = () => btAction(act, d.mac, label); return bb; };
+      if (!d.paired) td2.appendChild(mk('Pair', 'bt-pair'));
+      else if (d.connected) td2.appendChild(mk('Disconnect', 'bt-disconnect'));
+      else td2.appendChild(mk('Connect', 'bt-connect'));
+      if (d.paired) td2.appendChild(mk('Forget', 'bt-remove', 'danger'));
+      tr.append(td1, td2); t.appendChild(tr);
+    }
+    if (!quiet) { $('bt-msg').className = 'msg'; $('bt-msg').textContent = list.length ? `${list.length} devices — pair the one you want` : 'Nothing found. Put the device in pairing mode and scan again.'; }
+    document.getElementById('bt-dot').className = 'dot' + (list.some(d => d.connected) ? ' on' : '');
+  } catch (e) { $('bt-msg').className = 'msg err'; $('bt-msg').textContent = 'Bluetooth is not available on this machine.'; }
+  b.disabled = false;
+}
+$('bt-scan').onclick = () => btScan(false);
+
+/* ---------------- access ---------------- */
+let sshOn = true;
+$('ssh-toggle').onclick = async () => {
+  const off = sshOn;
+  if (!confirm(off ? 'Turn SSH off?\n\nYou will not be able to log in from a terminal until you turn it back on here.' : 'Turn SSH on?')) return;
+  $('acc-msg').className = 'msg'; $('acc-msg').textContent = 'Working…';
+  const r = await post('/api/admin/ssh-enable', { on: off ? '0' : '1' });
+  $('acc-msg').className = 'msg ' + (r.ok ? 'ok' : 'err');
+  $('acc-msg').textContent = r.message || '';
+  setTimeout(refresh, 1500);
+};
+$('signout').onclick = async () => { await post('/api/logout'); location.href = '/login'; };
+
+/* ---------------- the screen: Studio <-> text console ---------------- */
+let onConsole = false;
+$('console-btn').onclick = async () => {
+  const want = onConsole ? '0' : '1';
+  $('sys-msg').className = 'msg'; $('sys-msg').textContent = 'Switching the screen…';
+  const r = await post('/api/admin/console', { on: want });
+  $('sys-msg').className = 'msg ' + (r.ok ? 'ok' : 'err');
+  $('sys-msg').textContent = r.message || '';
+  setTimeout(refresh, 1200);
+};
+
+refresh(); swRefresh(); setInterval(refresh, 8000); setInterval(swRefresh, 6000);
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('/sw.js').catch(() => {});
+</script>
+</body>
+</html>

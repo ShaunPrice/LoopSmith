@@ -1,0 +1,17 @@
+// name: Ambient Swell
+// Chorus into reverb with a parallel dry tap.
+AudioEffectChorus    chorus1;
+AudioEffectFreeverb  verb1;
+AudioMixer4          mix1;
+
+AudioConnection c1(fxin, 0, chorus1, 0);
+AudioConnection c2(chorus1, 0, mix1, 1);     // dry tap
+AudioConnection c3(chorus1, 0, verb1, 0);
+AudioConnection c4(verb1, 0, mix1, 0);       // wet tap
+AudioConnection c5(mix1, 0, fxout, 0);
+
+chorus1.begin(3);
+verb1.roomsize(0.78);
+verb1.damping(0.35);
+mix1.gain(0, 0.55);
+mix1.gain(1, 0.8);

@@ -1,0 +1,30 @@
+// name: Drum Kit + Guitar
+// Kick / snare / hat on MIDI channel 10 (notes 36 / 38 / 42), mixed with the
+// guitar. Loop a beat, then play over it.
+AudioSynthSimpleDrum kick;
+AudioSynthSimpleDrum snare;
+AudioSynthSimpleDrum hat;
+AudioMixer4          kit1;
+AudioMixer4          src1;
+
+AudioConnection c1(kick, 0, kit1, 0);
+AudioConnection c2(snare, 0, kit1, 1);
+AudioConnection c3(hat, 0, kit1, 2);
+AudioConnection c4(fxin, 0, src1, 0);
+AudioConnection c5(kit1, 0, src1, 1);
+AudioConnection c6(src1, 0, fxout, 0);
+
+kick.frequency(60);
+kick.length(300);
+kick.pitchMod(0.6);
+snare.frequency(180);
+snare.length(150);
+snare.secondMix(0.5);
+hat.frequency(800);
+hat.length(60);
+kit1.gain(0, 1.0);
+kit1.gain(1, 0.8);
+kit1.gain(2, 0.5);
+kick.midi(10, kick, 36);
+snare.midi(10, snare, 38);
+hat.midi(10, hat, 42);

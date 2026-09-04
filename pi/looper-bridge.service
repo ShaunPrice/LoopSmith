@@ -1,0 +1,22 @@
+[Unit]
+Description=LoopSmith bridge (pedal USB serial <-> WebSocket, serves the Studio editor)
+After=network-online.target
+Wants=network-online.target
+# keep retrying forever (a transient failure must not park the service until reboot)
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=__USER__
+Group=dialout
+WorkingDirectory=/opt/looper/pi
+ExecStartPost=-/bin/sh -c "/opt/looper/pi/midi-connect.sh"
+ExecStart=/usr/bin/python3 /opt/looper/pi/looper_bridge.py --http 0.0.0.0:80 --editor /opt/looper/editor --www /opt/looper/pi/www --storage /media/usb
+Restart=always
+RestartSec=2
+# bind port 80 without running as root
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
