@@ -5308,7 +5308,9 @@ function midiNoteText(b) {
 function midiSawInput(u8) {
   midi.inCount += [...u8].filter(b => b & 0x80).length;
   midi.last = midiNoteText(u8);
-  midiPaint();
+  // The Pi relays every note a file plays, so this runs dozens of times a second:
+  // coalesce to one repaint per frame rather than one per note.
+  if (!midi.paintQueued) { midi.paintQueued = true; requestAnimationFrame(() => { midi.paintQueued = false; midiPaint(); }); }
 }
 
 /* ---- transport 1: the bridge's /midi socket ---- */
@@ -6293,8 +6295,17 @@ function midiPaint() {
   const outN = tr === 'bridge' ? (st.out_events !== undefined ? st.out_events : midi.outCount) : midi.outCount;
   $('#midiAct').textContent = `in ${inN} · out ${outN}${midi.last ? ' · ' + midi.last : ''}`;
   // files
-  const box = $('#midiFiles'); box.textContent = '';
   const rows = tr === 'bridge' ? midi.files : midi.local;
+  const playingFile = tr === 'bridge' ? (st.playing ? st.file : '') : (midi.player ? midi.player.name : '');
+  const sig = [tr, playingFile, midi.covOpen || '', midi.presetRev || 0,
+               rows.map(f => f.name + '/' + (f.bytes || 0) + '/' + (f.mtime || 0) + '/' + (f.uses ? 1 : 0)).join(',')].join('|');
+  if (sig !== midi.listSig) midiPaintRows(rows, tr, st, sig);
+  midiPaintTail(tr, st);
+}
+function midiPaintRows(rows, tr, st, sig) {
+  midi.listSig = sig;
+  const box = $('#midiFiles'), keepScroll = box.scrollTop;
+  box.textContent = '';
   if (!rows.length) { const e = document.createElement('div'); e.className = 'play-hint'; e.textContent = tr === 'bridge' ? 'No MIDI files on the Pi yet — upload one.' : 'Upload a .mid to play it from here.'; box.appendChild(e); }
   for (const f of rows) {
     const row = document.createElement('div'); row.className = 'looprow';
@@ -6350,6 +6361,9 @@ function midiPaint() {
       badge.classList.toggle('pinned', pinned);
     }
   }
+  box.scrollTop = keepScroll;                       // a rebuild must not jump the list back to the top
+}
+function midiPaintTail(tr, st) {
   // progress
   const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
   const prog = $('#midiProg');
@@ -7689,6 +7703,7 @@ function removeItem(idx) {
   structuralChange();
 }
 function structuralChange() {
+  midi.presetRev = (midi.presetRev || 0) + 1;      // the MIDI panel's coverage marks depend on the preset
   const p = current();
   p.updated = Date.now();
   store.saveSoon();
@@ -8556,6 +8571,7 @@ function vuFrame(t) {
 
 /* ---------------- top-level render ---------------- */
 function renderAll() {
+  midi.presetRev = (midi.presetRev || 0) + 1;
   renderLibrary();
   renderChain();
   renderCode();
