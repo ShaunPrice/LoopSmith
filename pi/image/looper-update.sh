@@ -143,6 +143,14 @@ do_apply() {
     result "update failed - rolled back"; echo "update failed - rolled back"; rm -rf "$work" "$tmp"; return 1
   fi
   systemctl restart looper-audio looper-backing looper-kiosk 2>/dev/null
+  # The boot splash lives in the initramfs, so a changed theme has to be reinstalled and
+  # the initramfs rebuilt. That takes a minute on a Pi 3 and is not needed for the update
+  # to work, so it runs on afterwards in the background and only when something changed.
+  local theme=/usr/share/plymouth/themes/looper
+  if [ -d "$theme" ] && [ -d "$APP/splash" ] && ! diff -rq "$APP/splash" "$theme" >/dev/null 2>&1; then
+    log "boot splash changed - reinstalling the theme and rebuilding the initramfs"
+    nohup sh -c "install -m 644 '$APP'/splash/* '$theme'/ && plymouth-set-default-theme -R looper" >> "$LOG" 2>&1 &
+  fi
   [ -n "${b:-}" ] && [ -f "$b" ] && mv "$b" "$b.installed" 2>/dev/null    # don't install the same bundle twice
   log "updated to $v"
   result "updated to $v"

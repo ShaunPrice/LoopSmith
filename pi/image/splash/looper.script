@@ -1,6 +1,12 @@
-# LoopSmith boot splash: the mark, centred on the pedal's own dark ground, with a
-# quiet progress bar. Kernel chatter is moved off this console by cmdline.txt, so the
-# screen shows this until the Studio kiosk takes over.
+# LoopSmith boot splash: the mark, centred on the pedal's own dark ground, a quiet
+# progress bar, and along the bottom the band score from Studio playing itself - the
+# playhead sweeps the eight bars, notes light as it passes, and it loops until the kiosk
+# takes over. Kernel chatter is moved off this console by cmdline.txt.
+#
+# The score is two images rendered by Studio (score-base.png, and score-lit.png with every
+# note lit): each refresh crops a slice of the lit one around the playhead and lays it over
+# the base, so no frames are shipped and the initramfs stays small. Image.Crop needs
+# Plymouth 0.9.3 or later (Trixie ships 24.x).
 
 Window.SetBackgroundTopColor(0.059, 0.066, 0.082);
 Window.SetBackgroundBottomColor(0.059, 0.066, 0.082);
@@ -20,13 +26,76 @@ bg.sprite.SetPosition(bar.x, bar.y, 1);
 fill.image = Image("bar-fill.png");
 fill.width = fill.image.GetWidth();
 
+# ---- the score strip ----------------------------------------------------------------
+# Geometry comes from how Studio drew the images: a name gutter, then 46.4 px per quarter
+# note at 100 bpm (the band file), so the playhead moves 77.33 px per second and the
+# eight bars are 1484.8 px of music. Scaled down together if the screen is short.
+score.base = Image("score-base.png");
+score.lit  = Image("score-lit.png");
+score.head = Image("score-head.png");
+score.gutter = 83.2;
+score.pxs    = 77.33;
+score.music  = 1484.8;
+score.f = 1;
+avail = Window.GetHeight() - (bar.y + bg.image.GetHeight()) - 70;
+if (avail < score.base.GetHeight()) {
+    score.f = avail / score.base.GetHeight();
+    if (score.f < 0.4) score.f = 0.4;
+    score.base = score.base.Scale(Math.Int(score.base.GetWidth() * score.f), Math.Int(score.base.GetHeight() * score.f));
+    score.lit  = score.lit.Scale(Math.Int(score.lit.GetWidth() * score.f),  Math.Int(score.lit.GetHeight() * score.f));
+    score.head = score.head.Scale(score.head.GetWidth(), score.base.GetHeight());
+    score.gutter = score.gutter * score.f;
+    score.pxs    = score.pxs * score.f;
+    score.music  = score.music * score.f;
+}
+score.h = score.base.GetHeight();
+score.w = Window.GetWidth() - 80;                 # the window we show the score through
+if (score.w > score.base.GetWidth()) score.w = score.base.GetWidth();
+score.x = Window.GetWidth() / 2 - score.w / 2;
+score.y = Window.GetHeight() - score.h - 36;
+score.slice = 32;                                 # width of the lit band around the playhead
+
+score.bg = Sprite();
+score.bg.SetPosition(score.x, score.y, 2);
+score.on = Sprite();
+score.on.SetPosition(score.x, score.y, 3);
+score.cursor = Sprite(score.head);
+score.cursor.SetPosition(score.x, score.y, 4);
+score.cursor.SetOpacity(0.9);
+
+score.offset = -1;
+fun draw_score(t) {
+    # where the playhead is in the image, looping over the eight bars
+    loop = score.music / score.pxs;
+    while (t >= loop) t = t - loop;
+    hx = score.gutter + t * score.pxs;
+    # pan only when the score is wider than the window: keep the head a third of the way in
+    off = 0;
+    if (score.base.GetWidth() > score.w) {
+        off = hx - score.w * 0.35;
+        if (off < 0) off = 0;
+        if (off > score.base.GetWidth() - score.w) off = score.base.GetWidth() - score.w;
+    }
+    if (off != score.offset) {
+        score.bg.SetImage(score.base.Crop(Math.Int(off), 0, score.w, score.h));
+        score.offset = off;
+    }
+    sx = hx - score.slice / 2;
+    if (sx < 0) sx = 0;
+    if (sx > score.base.GetWidth() - score.slice) sx = score.base.GetWidth() - score.slice;
+    score.on.SetImage(score.lit.Crop(Math.Int(sx), 0, score.slice, score.h));
+    score.on.SetX(score.x + sx - off);
+    score.cursor.SetX(score.x + hx - off);
+}
+
 fun refresh_cb() {
-    # a gentle sweep while there is no real progress to report
+    # Plymouth refreshes about fifty times a second
     time = time + 0.02;
     frac = (Math.Sin(time * 1.6) + 1) / 2;
     piece = fill.image.Scale(Math.Int(fill.width * (0.15 + 0.85 * frac)) + 1, fill.image.GetHeight());
     fill.sprite = Sprite(piece);
     fill.sprite.SetPosition(bar.x, bar.y, 2);
+    draw_score(time);
 }
 time = 0;
 Plymouth.SetRefreshFunction(refresh_cb);
@@ -38,9 +107,9 @@ fun progress_cb(duration, progress) {
 }
 Plymouth.SetBootProgressFunction(progress_cb);
 
-# fsck / service messages, kept small and out of the way
+# fsck / service messages, kept small, just above the score
 message.sprite = Sprite();
-message.sprite.SetPosition(0, Window.GetHeight() - 60, 5);
+message.sprite.SetPosition(0, score.y - 28, 5);
 fun message_cb(text) {
     image = Image.Text(text, 0.55, 0.58, 0.65, 1, "Sans 12");
     message.sprite.SetImage(image);
