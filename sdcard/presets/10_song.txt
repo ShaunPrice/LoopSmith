@@ -1,5 +1,5 @@
 // name: Song (guitars + bass + drums)
-// A little band inside the pedal: a four-voice rhythm guitar on channel 1, a
+// A little band inside the pedal, balanced so each part carries on its own: a four-voice rhythm guitar on channel 1, a
 // two-voice lead guitar on channel 2, a bass on channel 3 and a kit on channel
 // 10. Plucked strings are Karplus-Strong models; the drums are SimpleDrum.
 AudioSynthKarplusStrong gtr1;
@@ -54,17 +54,17 @@ hat.length(50);
 kick.midi(10, kick, 36);
 snare.midi(10, snare, 38);
 hat.midi(10, hat, 42);
-gtrmix.gain(0, 0.28);
-gtrmix.gain(1, 0.28);
-gtrmix.gain(2, 0.28);
-gtrmix.gain(3, 0.28);
-band.gain(0, 0.4);
-band.gain(1, 0.4);
-band.gain(2, 0.5);
-band.gain(3, 0.55);
-kit1.gain(0, 0.6);
-kit1.gain(1, 0.4);
-kit1.gain(2, 0.2);
+gtrmix.gain(0, 0.55);
+gtrmix.gain(1, 0.55);
+gtrmix.gain(2, 0.55);
+gtrmix.gain(3, 0.55);
+band.gain(0, 0.55);
+band.gain(1, 0.55);
+band.gain(2, 0.40);
+band.gain(3, 0.70);
+kit1.gain(0, 0.55);
+kit1.gain(1, 0.60);
+kit1.gain(2, 0.40);
 verb1.roomsize(0.6);
 verb1.damping(0.45);
 wet1.gain(0, 0.25);
