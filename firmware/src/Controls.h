@@ -75,6 +75,7 @@ public:
         for (int i = 0; i < 6; i++) { sw_[i].begin(pins[i]); sw_[i].setHoldMs(LOOPER_HOLD_CLEAR_MS); }
         pinMode(PIN_LED_REC, OUTPUT);
         pinMode(PIN_LED_PLAY, OUTPUT);
+        pinMode(LED_BUILTIN, OUTPUT);       // the board's own LED: a heartbeat (see updateLeds)
     }
 
     SwitchEvents poll()
@@ -109,9 +110,14 @@ public:
         // no use as a running light - pin 13 is SPI SCK to the audio shield's flash, so it
         // only flickers with flash traffic (the one flash at boot is the preset mirror).
         // A short green blink every two seconds says the pedal is alive and idle.
-        if (s == AudioEffectLooper::STOPPED && !hasLoop) play = (now % 2000) < 40;
+        if (!hasLoop && (s == AudioEffectLooper::EMPTY || s == AudioEffectLooper::STOPPED)) play = (now % 2000) < 40;
         digitalWrite(PIN_LED_REC, rec ? HIGH : LOW);
         digitalWrite(PIN_LED_PLAY, play ? HIGH : LOW);
+        // The Teensy's orange LED is the running light for a build with no panel LEDs
+        // yet: lit while the pedal is up, with a 60 ms dip once a second so it reads as
+        // alive rather than stuck. Pin 13 doubles as SPI clock to the shield flash;
+        // PresetStore hands the pin back to the LED after every flash access.
+        digitalWrite(LED_BUILTIN, (now % 1000) < 60 ? LOW : HIGH);
     }
 
 private:

@@ -1,4 +1,15 @@
 #include "PresetStore.h"
+#include <SPI.h>
+
+// The Teensy's orange LED is on pin 13, which is also the SPI clock to the audio
+// shield's flash. Every touch of that flash goes through this file, so the pin is
+// handed to SPI for the duration of each access and back to the LED afterwards:
+// the LED reads "running" the whole time the pedal is up, dipping only while the
+// flash is actually busy. SPI.begin() re-muxes the pin each time; that is its job.
+struct FlashBus {
+    FlashBus()  { SPI.begin(); }
+    ~FlashBus() { pinMode(LED_BUILTIN, OUTPUT); digitalWrite(LED_BUILTIN, HIGH); }
+};
 
 static bool isPresetName(const String &n)
 {
@@ -10,6 +21,7 @@ static bool isPresetName(const String &n)
 
 void PresetStore::begin()
 {
+    FlashBus bus;
     pinMode(PIN_SHIELD_SD_CS, OUTPUT);
     digitalWrite(PIN_SHIELD_SD_CS, HIGH);            // keep the shield SD socket quiet
 
@@ -34,6 +46,7 @@ bool PresetStore::sdUsable()
 
 void PresetStore::poll()
 {
+    FlashBus bus;
     if (sdOk_ || millis() - lastSdTry_ < 4000) return;
     lastSdTry_ = millis();
     if (SD.begin(BUILTIN_SDCARD)) {
@@ -53,6 +66,7 @@ FS *PresetStore::activeFS()
 
 void PresetStore::rescan()
 {
+    FlashBus bus;
     names_.clear();
     FS *fs = activeFS();
     if (!fs) return;
@@ -115,6 +129,7 @@ bool PresetStore::writeFile(FS &fs, const String &path, const char *data, size_t
 
 bool PresetStore::readPreset(const String &name, char **data, size_t *len)
 {
+    FlashBus bus;
     FS *fs = activeFS();
     if (!fs) return false;
     return readFile(*fs, String(PRESET_DIR) + "/" + name, data, len);
@@ -122,6 +137,7 @@ bool PresetStore::readPreset(const String &name, char **data, size_t *len)
 
 bool PresetStore::readSettings(char **data, size_t *len)
 {
+    FlashBus bus;
     FS *fs = activeFS();
     if (!fs) return false;
     return readFile(*fs, SETTINGS_FILE, data, len);
@@ -129,6 +145,7 @@ bool PresetStore::readSettings(char **data, size_t *len)
 
 bool PresetStore::writePreset(const String &name, const char *data, size_t len, String &err)
 {
+    FlashBus bus;
     if (!isPresetName(name) || name.indexOf('/') != -1 || name.indexOf('\\') != -1 ||
         name.indexOf(' ') != -1) {
         err = "preset names must be plain *.txt files without spaces";
@@ -166,6 +183,7 @@ bool PresetStore::writePreset(const String &name, const char *data, size_t len, 
 
 bool PresetStore::removePreset(const String &name, String &err)
 {
+    FlashBus bus;
     if (name.indexOf('/') != -1 || name.indexOf('\\') != -1) {
         err = "bad name";
         return false;
