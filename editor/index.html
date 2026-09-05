@@ -474,6 +474,12 @@ input[type=range]::-moz-range-thumb{
 .midi-cov.ok{color:var(--ok,#4caf50)}
 .midi-cov.warn{color:var(--warn,#e0a030)}
 .midi-cov-note{font-size:11px;line-height:1.35;color:var(--warn,#e0a030);margin:-2px 0 6px 2px}
+.chan-row{display:flex;align-items:center;gap:8px;margin:4px 0}
+.chan-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.chan-row .midi-sel{width:120px}
+.chan-warn{color:var(--warn,#e0a030);cursor:help}
+#chanFile{margin-top:6px;color:var(--muted)}
+#chanFile.chan-gap{color:var(--warn,#e0a030)}
 #scoreBox{overflow-x:auto;overflow-y:hidden;margin:6px 0;background:var(--panel2,#12151c);border:1px solid var(--border);border-radius:6px}
 #scoreBox svg{display:block}
 #scoreNote{color:var(--muted);font-size:11px}
@@ -803,7 +809,7 @@ path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
 const EFFECTS_SCHEMA =
 {
   "version": 1,
-  "comment": "Single source of truth for the PatchScript effect registry. The firmware (EffectRegistry.cpp) and the Studio editor embed this table \u2014 keep all three in sync.",
+  "comment": "Single source of truth for the PatchScript effect registry. The firmware (EffectRegistry.cpp) and the Studio editor embed this table — keep all three in sync.",
   "constants": {
     "WAVEFORM_SINE": 0,
     "WAVEFORM_SAWTOOTH": 1,
@@ -3613,7 +3619,7 @@ const EFFECTS_SCHEMA =
     },
     {
       "id": "drumkit",
-      "label": "Drum kit (kick \u00b7 snare \u00b7 hat)",
+      "label": "Drum kit (kick · snare · hat)",
       "note": "Editor instrument: three AudioSynthSimpleDrum voices on channel 10 bound to notes 36/38/42, mixed.",
       "params": [
         {
@@ -3622,6 +3628,15 @@ const EFFECTS_SCHEMA =
           "max": 1,
           "step": 0.01,
           "default": 0.8
+        },
+        {
+          "name": "channel",
+          "label": "MIDI channel",
+          "min": 1,
+          "max": 16,
+          "step": 1,
+          "default": 10,
+          "note": "Which MIDI channel the kit answers. 10 is the General MIDI drum channel."
         }
       ],
       "template": {
@@ -3716,6 +3731,15 @@ const EFFECTS_SCHEMA =
           "default": 400,
           "unit": "ms",
           "label": "Kick decay"
+        },
+        {
+          "name": "channel",
+          "label": "MIDI channel",
+          "min": 1,
+          "max": 16,
+          "step": 1,
+          "default": 10,
+          "note": "Which MIDI channel the kit answers. 10 is the General MIDI drum channel."
         }
       ],
       "template": {
@@ -4063,6 +4087,15 @@ const EFFECTS_SCHEMA =
           "max": 1,
           "step": 0.01,
           "default": 0.8
+        },
+        {
+          "name": "channel",
+          "label": "MIDI channel",
+          "min": 1,
+          "max": 16,
+          "step": 1,
+          "default": 10,
+          "note": "Which MIDI channel the kit answers. 10 is the General MIDI drum channel."
         }
       ],
       "template": {
@@ -4242,6 +4275,15 @@ const EFFECTS_SCHEMA =
           "text": true,
           "default": "",
           "label": "Pad 4 file"
+        },
+        {
+          "name": "channel",
+          "label": "MIDI channel",
+          "min": 1,
+          "max": 16,
+          "step": 1,
+          "default": 10,
+          "note": "Which MIDI channel the kit answers. 10 is the General MIDI drum channel."
         }
       ],
       "template": {
@@ -4370,7 +4412,7 @@ const EFFECTS_SCHEMA =
         "optional": true
       }
     ],
-    "note": "PatchScript extension, see PATCHSCRIPT.md \u2014 binds the object as a MIDI voice.",
+    "note": "PatchScript extension, see PATCHSCRIPT.md — binds the object as a MIDI voice.",
     "extensions": {
       "midiRatio(x)": "multiply the note frequency for this object (FM modulators, detune, sub-octaves)",
       "midiVelocity(s)": "velocity sensitivity 0..1 for oscillators: amplitude = base * (1 - s + s * velocity)",
@@ -4658,7 +4700,7 @@ function emitInstrument(it, g) {
   };
 
   if (t.family === 'pads') {
-    const ch = t.channel || 10, pads = activePads(it);
+    const ch = Math.round(it.p.channel || t.channel || 10), pads = activePads(it);
     // up to four pads sit on the instrument mixer; bigger kits get two sub-mixers
     let targets;
     if (pads.length <= 4) targets = pads.map((_, k) => [mix, k]);
@@ -4711,7 +4753,7 @@ function instFits(preset, it) {
 }
 /** Lowest MIDI channel (1-9, 11-16; 10 is the drum channel) no other melodic card uses. */
 function nextFreeChannel(preset) {
-  const used = new Set(instruments(preset).filter(i => i.id !== 'drumkit').map(i => Math.round(i.p.channel || 0)));
+  const used = new Set(instruments(preset).filter(i => !isPads(i)).map(i => instChannel(i)));
   for (let ch = 1; ch <= 16; ch++) if (ch !== 10 && !used.has(ch)) return ch;
   return 1;
 }
@@ -4722,7 +4764,7 @@ function instrumentIssues(preset) {
   const out = [];
   if (preset.mode === 'custom') return out;
   const on = instruments(preset).filter(it => it.on);
-  const hasDrums = on.some(it => isPads(it));
+  const kitCh = new Set(on.filter(it => isPads(it)).map(it => instChannel(it)));
   const byCh = {};
   for (const it of on) {
     if (isPads(it)) continue;
@@ -4733,7 +4775,7 @@ function instrumentIssues(preset) {
     const ch = +k, names = byCh[k];
     if (names.length > 1) out.push({ line: 0, ch, msg: `${names.join(' and ')} share MIDI channel ${ch} — the pedal allocates voices per channel, so each keyboard also plays the other's voices; give every instrument its own channel` });
     if (ch === 0) out.push({ line: 0, ch, msg: `${names.join(', ')} on channel 0 (omni) answers every channel, including the other instruments' notes` });
-    if (ch === 10 && hasDrums) out.push({ line: 0, ch, msg: `${names.join(', ')} on channel 10 shares the drum kit's channel — pads and keys will trigger each other` });
+    if (kitCh.has(ch)) out.push({ line: 0, ch, msg: `${names.join(', ')} on channel ${ch} shares a kit's channel — pads and keys will trigger each other` });
   }
   return out;
 }
@@ -5025,6 +5067,10 @@ function recognizeSeries(p) {
  * preferMeta=false (edit-as-text resync): the meta is only trusted when the text still
  * matches its regeneration — otherwise hand edits would be silently reverted.
  */
+/** Normalised text without the chain-meta line — what actually reaches the pedal. */
+function stripMeta(t) {
+  return normalizeText(String(t).split('\n').filter(l => !/^\s*\/\/\s*chain-meta:/.test(l)).join('\n'));
+}
 function resolvePresetFromText(text, fallbackTitle /* , preferMeta: retired */) {
   const p = parsePatch(text);
   const title = (p.title && p.title.length) ? p.title : (fallbackTitle || 'Untitled');
@@ -5034,9 +5080,12 @@ function resolvePresetFromText(text, fallbackTitle /* , preferMeta: retired */) 
     if (chain && insts) {
       // chain-meta is only trusted when the file body still matches its
       // regeneration — otherwise hand edits (on the SD card, in any text
-      // editor) would be silently reverted on import/pull.
+      // editor) would be silently reverted on import/pull. The comparison
+      // ignores the chain-meta line itself: that line is our own bookkeeping,
+      // and holding it to the byte would mean every preset ever written became
+      // custom routing the moment a macro gained a parameter.
       const candidate = { title, mode: 'chain', chain, instruments: insts, customText: null };
-      if (normalizeText(generateText(candidate)) === normalizeText(text))
+      if (stripMeta(generateText(candidate)) === stripMeta(text))
         return candidate;
     }
   }
@@ -5432,6 +5481,90 @@ function midiLocalPlay(file, loop) {
 function midiLocalStop() { if (midi.player) { midi.player.stop(); midi.player = null; midiPaint(); } }
 
 /* ==========================================================================
+   Channels — which instrument answers which MIDI channel, in one place.
+
+   Every instrument card carries a channel (kits included, since a kit is only
+   pinned to 10 by default), so this panel is a view onto those settings: set a
+   channel here and the card follows, and vice versa. Underneath, the channels
+   the selected MIDI file actually plays are listed against what answers them,
+   which is the same test the MIDI panel's tick and warning use.
+   ========================================================================== */
+function chanRows() {
+  const p = current();
+  return (p && p.mode === 'chain') ? instruments(p) : [];
+}
+function chanPaint() {
+  const box = $('#chanBox'); if (!box) return;
+  const p = current(), rows = chanRows();
+  box.textContent = '';
+  if (!p || p.mode === 'custom') {
+    const b = presetBindings(p), used = new Set([...b.any, ...b.notes.keys()]);
+    const d = document.createElement('div'); d.className = 'play-hint';
+    d.textContent = used.size
+      ? 'Custom routing — its midi() lines answer ' + [...used].sort((x, y) => x - y).map(c => 'ch ' + c).join(', ')
+        + '. Edit the text to change them.'
+      : 'Custom routing with no midi() bindings, so nothing answers any channel.';
+    box.appendChild(d); chanPaintFile(); return;
+  }
+  if (!rows.length) {
+    const d = document.createElement('div'); d.className = 'play-hint';
+    d.textContent = 'No instruments in this preset yet — add one in the Instruments lane and it will appear here.';
+    box.appendChild(d); chanPaintFile(); return;
+  }
+  const clash = new Map();
+  for (const it of rows) clash.set(instChannel(it), (clash.get(instChannel(it)) || 0) + 1);
+  rows.forEach((it, idx) => {
+    const row = document.createElement('div'); row.className = 'chan-row';
+    const name = document.createElement('span'); name.className = 'chan-name';
+    name.textContent = MACRO_BY_ID[it.id].label;
+    name.title = MACRO_BY_ID[it.id].note || '';
+    const sel = document.createElement('select'); sel.className = 'midi-sel';
+    for (let c = 1; c <= 16; c++) {
+      const o = document.createElement('option');
+      o.value = c; o.textContent = 'ch ' + c + (c === 10 ? ' (drums)' : '');
+      if (c === instChannel(it)) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.title = isPads(it) ? 'Which channel this kit answers. Its pads keep their General MIDI notes.'
+                           : 'Which channel this instrument answers.';
+    sel.addEventListener('change', ev => {
+      it.p.channel = clamp(Math.round(+ev.target.value) || 1, 1, 16);
+      releaseAllNotes(); structuralChange();
+    });
+    row.append(name, sel);
+    if (clash.get(instChannel(it)) > 1 && !isPads(it)) {
+      const w = document.createElement('span'); w.className = 'chan-warn'; w.textContent = '⚠';
+      w.title = 'Another instrument answers this channel too — they will both play every note sent to it.';
+      row.appendChild(w);
+    }
+    box.appendChild(row);
+  });
+  chanPaintFile();
+}
+/** What the file in the Score panel needs, against what now answers it. */
+function chanPaintFile() {
+  const line = $('#chanFile'); if (!line) return;
+  const f = scoreFiles().find(x => x.name === score.file);
+  if (!f || !f.uses) { line.textContent = ''; return; }
+  const cov = midiCoverage(f), gaps = new Map((cov ? cov.gaps : []).map(g => [g.ch, g]));
+  const parts = [...f.uses.keys()].sort((a, b) => a - b).map(ch => (gaps.has(ch) ? '⚠ ' : '✓ ') + 'ch' + ch);
+  line.textContent = f.name + ' plays ' + parts.join(' · ');
+  line.className = 'midi-line mono' + (gaps.size ? ' chan-gap' : '');
+}
+function chanBuildSection() {
+  const sec = document.createElement('div'); sec.className = 'dev-sec coll'; sec.id = 'chanSec';
+  sec.innerHTML = `<h3 role="button" tabindex="0"><span class="caret">&#9660;</span> MIDI CHANNELS</h3>
+  <div class="sec-body" id="chanBody">
+    <div id="chanBox"></div>
+    <div class="midi-line mono" id="chanFile"></div>
+  </div>`;
+  const after = $('#midiSec') || $('#device').lastElementChild;
+  after.insertAdjacentElement('afterend', sec);
+  sec.querySelector('h3').addEventListener('click', () => sec.classList.toggle('closed'));
+  chanPaint();
+}
+
+/* ==========================================================================
    Score — the notes of a MIDI file on staves, one per instrument, with a
    playhead that follows whoever is playing: the Pi (position_s, polled once a
    second and interpolated) or this browser's own player.
@@ -5538,8 +5671,7 @@ function scorePartName(ch, perc) {
   if (p && Array.isArray(p.instruments)) {
     for (const it of p.instruments) {
       const def = MACRO_BY_ID[it.id]; if (!def) continue;
-      const isKit = /kit|perc|drum/i.test(it.id);
-      if (isKit ? ch === 10 : Math.round(it.p.channel || 0) === ch) return def.label;
+      if (instChannel(it) === ch) return def.label;
     }
   }
   return perc ? 'Drums' : 'Channel ' + ch;
@@ -5787,6 +5919,7 @@ function scorePaint() {
     note.textContent = ''; return;
   }
   box.innerHTML = scoreSvg(score.model);
+  chanPaintFile();
   const m = score.model;
   note.textContent = m.swing
     ? 'Shuffle feel — written straight, so the note values are approximate.'
@@ -6688,6 +6821,7 @@ function renderChain() {
   const p = current();
   renderChainBar();
   renderInstLane(p);
+  chanPaint();
   const board = $('#board');
   board.textContent = '';
 
@@ -7110,7 +7244,13 @@ const PC_KEYS = { a: 60, w: 61, s: 62, e: 63, d: 64, f: 65, t: 66, g: 67, y: 68,
 const DRUM_PADS = [['KICK', 36], ['SNARE', 38], ['HAT', 42]];
 const held = new Map();                                   // "note/ch" -> element (or null)
 
-function instChannel(item) { return isPads(item) ? (instTemplate(item).channel || 10) : Math.max(1, Math.round(item.p.channel || 0)); }
+/** The MIDI channel a card answers: its own setting, else the template's default.
+ *  Kits used to be pinned to the template (channel 10); they are assignable now. */
+function instChannel(item) {
+  const set = Math.round(item.p.channel || 0);
+  if (set >= 1 && set <= 16) return set;
+  return isPads(item) ? (instTemplate(item).channel || 10) : Math.max(1, set);
+}
 function noteOn(note, ch, el) {
   const key = note + '/' + ch;
   if (held.has(key)) return;
@@ -8301,6 +8441,7 @@ function init() {
   /* instruments picker */
   $('#instClose').addEventListener('click', closeInstPalette);
   midiBuildSection();
+  chanBuildSection();
   scoreBuildSection();
   sysBuildSection();
   // Served by the companion Pi: a plain link to its setup page, right next to the connection pill

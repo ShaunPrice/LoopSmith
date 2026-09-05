@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "comment": "Single source of truth for the PatchScript effect registry. The firmware (EffectRegistry.cpp) and the Studio editor embed this table \u2014 keep all three in sync.",
+  "comment": "Single source of truth for the PatchScript effect registry. The firmware (EffectRegistry.cpp) and the Studio editor embed this table — keep all three in sync.",
   "constants": {
     "WAVEFORM_SINE": 0,
     "WAVEFORM_SAWTOOTH": 1,
@@ -2810,7 +2810,7 @@
     },
     {
       "id": "drumkit",
-      "label": "Drum kit (kick \u00b7 snare \u00b7 hat)",
+      "label": "Drum kit (kick · snare · hat)",
       "note": "Editor instrument: three AudioSynthSimpleDrum voices on channel 10 bound to notes 36/38/42, mixed.",
       "params": [
         {
@@ -2819,6 +2819,15 @@
           "max": 1,
           "step": 0.01,
           "default": 0.8
+        },
+        {
+          "name": "channel",
+          "label": "MIDI channel",
+          "min": 1,
+          "max": 16,
+          "step": 1,
+          "default": 10,
+          "note": "Which MIDI channel the kit answers. 10 is the General MIDI drum channel."
         }
       ],
       "template": {
@@ -2913,6 +2922,15 @@
           "default": 400,
           "unit": "ms",
           "label": "Kick decay"
+        },
+        {
+          "name": "channel",
+          "label": "MIDI channel",
+          "min": 1,
+          "max": 16,
+          "step": 1,
+          "default": 10,
+          "note": "Which MIDI channel the kit answers. 10 is the General MIDI drum channel."
         }
       ],
       "template": {
@@ -3260,6 +3278,15 @@
           "max": 1,
           "step": 0.01,
           "default": 0.8
+        },
+        {
+          "name": "channel",
+          "label": "MIDI channel",
+          "min": 1,
+          "max": 16,
+          "step": 1,
+          "default": 10,
+          "note": "Which MIDI channel the kit answers. 10 is the General MIDI drum channel."
         }
       ],
       "template": {
@@ -3439,6 +3466,15 @@
           "text": true,
           "default": "",
           "label": "Pad 4 file"
+        },
+        {
+          "name": "channel",
+          "label": "MIDI channel",
+          "min": 1,
+          "max": 16,
+          "step": 1,
+          "default": 10,
+          "note": "Which MIDI channel the kit answers. 10 is the General MIDI drum channel."
         }
       ],
       "template": {
@@ -3567,7 +3603,7 @@
         "optional": true
       }
     ],
-    "note": "PatchScript extension, see PATCHSCRIPT.md \u2014 binds the object as a MIDI voice.",
+    "note": "PatchScript extension, see PATCHSCRIPT.md — binds the object as a MIDI voice.",
     "extensions": {
       "midiRatio(x)": "multiply the note frequency for this object (FM modulators, detune, sub-octaves)",
       "midiVelocity(s)": "velocity sensitivity 0..1 for oscillators: amplitude = base * (1 - s + s * velocity)",
