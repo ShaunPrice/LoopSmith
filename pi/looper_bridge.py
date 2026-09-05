@@ -1704,7 +1704,7 @@ class Server:
         if path.startswith("/api/admin/") and method == "POST":
             action = path[len("/api/admin/"):]
             if action not in ("set-password", "set-username", "set-hotspot", "hotspot-enable", "ssh-enable",
-                              "stage-bundle", "console", "claim-account", "reset-login", "bt-scan", "bt-pair", "bt-connect", "bt-disconnect",
+                              "stage-bundle", "console", "kiosk-reload", "claim-account", "reset-login", "bt-scan", "bt-pair", "bt-connect", "bt-disconnect",
                               "bt-remove", "bt-power"):
                 await self._json(w, {"ok": False, "message": "unknown action"}, "404 Not Found")
                 return

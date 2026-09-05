@@ -75,6 +75,8 @@ switches off at that point and stays off; from then on the pedal lives at
 | **Login** | change the password; reset the account (at the pedal's screen only) |
 | **This pedal computer** | which screen is showing, console/Studio, restart, shut down |
 
+After an update the Studio kiosk on the Pi's screen reloads itself when it sees the new version. If it does not, **Reload the screen** on the Setup page restarts the kiosk browser (nothing else restarts), and Studio's own *Pedal computer* section has **Reload this screen** for whichever browser you are in.
+
 ## Updates
 
 *Check for updates* → *Install*, from the setup page or Studio. Sources, in order:

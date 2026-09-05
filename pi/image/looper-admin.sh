@@ -162,6 +162,13 @@ RENAME
     fi
     ;;
 
+  kiosk-reload)
+    # The kiosk browser has no address bar and no keyboard shortcut a touchscreen can
+    # reach, so this is how the screen picks up a new version of Studio. Only the
+    # browser restarts: the bridge, the pedal and any loop playing carry on.
+    if systemctl restart looper-kiosk.service >>"$LOG" 2>&1; then result 1 "the screen is reloading Studio"
+    else result 0 "could not restart the kiosk"; fi
+    ;;
   console)
     # The kiosk owns tty1. Switching virtual terminals shows a login prompt on the screen
     # and back again, with nothing restarted and the pedal untouched.

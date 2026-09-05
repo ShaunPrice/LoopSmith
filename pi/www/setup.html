@@ -120,6 +120,7 @@ table{width:100%;border-collapse:collapse;font-size:14px}td{padding:6px 0;border
   <div class="row"><span>Screen shows</span><span id="sys-vt">…</span></div>
   <div class="actions">
     <button id="console-btn">Show console on the screen</button>
+    <button id="kiosk-reload" title="Restart the browser on the HDMI screen so it loads the current Studio — the pedal keeps playing">Reload the screen</button>
     <button id="reboot">Restart</button><button id="off" class="danger">Shut down</button>
   </div>
   <div class="msg" id="sys-msg"></div>
@@ -327,6 +328,12 @@ $('signout').onclick = async () => { await post('/api/logout'); location.href = 
 
 /* ---------------- the screen: Studio <-> text console ---------------- */
 let onConsole = false;
+$('kiosk-reload').onclick = async () => {
+  $('sys-msg').className = 'msg'; $('sys-msg').textContent = 'Reloading the screen…';
+  const r = await post('/api/admin/kiosk-reload', {});
+  $('sys-msg').className = 'msg ' + (r.ok ? 'ok' : 'err');
+  $('sys-msg').textContent = r.message || '';
+};
 $('console-btn').onclick = async () => {
   const want = onConsole ? '0' : '1';
   $('sys-msg').className = 'msg'; $('sys-msg').textContent = 'Switching the screen…';

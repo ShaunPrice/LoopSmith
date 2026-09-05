@@ -97,7 +97,28 @@ button:disabled{opacity:.4;cursor:default}
 aside{background:var(--panel);display:flex;flex-direction:column;min-height:0}
 #library{flex:0 0 248px;border-right:1px solid var(--border)}
 #device{flex:0 0 300px;border-left:1px solid var(--border);overflow-y:auto}
-#center{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+#center{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;overflow-y:auto}
+#library.empty,#device.empty{display:none}
+#library>.dev-sec{padding:0;border-bottom:1px solid var(--border)}
+#center>.dev-sec{flex:0 0 auto;border-bottom:1px solid var(--border)}
+#center>#scoreSec{flex:1 1 0;min-height:160px;display:flex;flex-direction:column}
+#center>#scoreSec.closed{flex:0 0 auto;min-height:0}
+#center>#scoreSec>.sec-body{flex:1;display:flex;flex-direction:column;min-height:0}
+#center>#scoreSec #scoreBox{flex:1;overflow:auto}
+aside>#chainWrap,aside>#codePane{border-bottom:1px solid var(--border)}
+.pmove{margin-left:auto;background:none;border:0;color:var(--muted);font-size:14px;line-height:1;padding:0 4px;cursor:pointer;opacity:.35;border-radius:4px}
+.pmove:hover,.pmove:focus-visible{opacity:1;background:var(--panel2,#12151c)}
+.dev-sec>h3{display:flex;align-items:center}
+#chainBar>.pmove,.side-head>.pmove,.pane-head>.pmove{margin-left:6px}
+.panel>h3,.panel>.side-head,.panel>#chainBar,.panel>.pane-head{cursor:grab;user-select:none}
+.panel.dragging{opacity:.4}
+#dropPh{height:4px;margin:2px 8px;border-radius:2px;background:var(--accent,#5b8cff)}
+#panelMenu{position:fixed;z-index:60;min-width:170px;background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.45);padding:4px}
+#panelMenu .pm-title{font-size:10px;letter-spacing:1px;color:var(--muted);padding:6px 10px 4px;font-weight:700;text-transform:uppercase}
+#panelMenu button{display:block;width:100%;text-align:left;background:none;border:0;color:var(--text);font:inherit;font-size:12px;padding:7px 10px;border-radius:5px;cursor:pointer}
+#panelMenu button:hover{background:var(--panel2,#12151c)}
+.view-sel{width:auto;max-width:170px;flex:0 0 auto;margin:0 10px 0 0;font-size:11px}
+.view-sel.dirty{border-color:var(--warn,#e0a030)}
 @media (max-width:1180px){
   #library{flex-basis:212px}
   #device{flex-basis:264px}
@@ -551,6 +572,7 @@ path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
     <span id="connPill" class="pill off">Disconnected</span>
   </div>
   <div class="spacer"></div>
+  <select id="viewSel" class="midi-sel view-sel" title="Choose how the panels are arranged" aria-label="View"></select>
   <div class="transport" role="group" aria-label="Looper transport">
     <button id="tLoop"  class="tbtn rec" title="Loop — tap (record / play / overdub)" disabled>&#9679;</button>
     <button id="tStop"  class="tbtn" title="Stop" disabled>&#9632;</button>
@@ -565,6 +587,7 @@ path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
 
   <!-- Preset workspace -->
   <aside id="library" aria-label="Preset workspace">
+    <div class="dev-sec" id="libSec" data-title="Presets">
     <div class="side-head">PRESETS <button id="newBtn" class="btn sm accent">+ New</button></div>
     <div id="presetList"></div>
     <div class="lib-actions">
@@ -587,11 +610,12 @@ path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
       </div>
       <div id="sdUnsupported" class="hint" hidden>Folder access is not supported by this browser.</div>
     </div>
+    </div>
   </aside>
 
   <!-- Chain editor -->
   <section id="center">
-    <div id="chainWrap" style="flex:1;display:flex;flex-direction:column;min-height:0">
+    <div id="chainWrap" class="grow" data-title="Chain" style="flex:1;display:flex;flex-direction:column;min-height:0">
       <div id="chainBar">
         <div style="min-width:0">
           <div id="presetTitle"></div>
@@ -605,7 +629,7 @@ path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
     </div>
 
     <!-- Code view -->
-    <div id="codePane">
+    <div id="codePane" data-title="PatchScript">
       <div class="pane-head">
         <button class="pane-title" id="codeToggle" aria-expanded="true"><span class="caret">&#9660;</span> PATCHSCRIPT</button>
         <span id="codeStats"></span>
@@ -623,7 +647,7 @@ path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
 
   <!-- Device panel -->
   <aside id="device" aria-label="Device">
-    <div class="dev-sec">
+    <div class="dev-sec" id="devSec">
       <h3>DEVICE</h3>
       <div id="serialBanner" hidden>
         USB (Web Serial) needs <b>Chrome or Edge on desktop</b>. You can still connect
@@ -645,7 +669,7 @@ path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
       </div>
     </div>
 
-    <div class="dev-sec">
+    <div class="dev-sec" id="meterSec">
       <h3>METERS</h3>
       <div class="meter-row cpu"><span class="ml">CPU</span>
         <div class="vu" id="cpuVu"><div class="vu-cover"></div><div class="vu-segs"></div></div>
@@ -661,7 +685,7 @@ path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
         <span class="mv" id="vuOutText">—</span></div>
     </div>
 
-    <div class="dev-sec">
+    <div class="dev-sec" id="looperSec">
       <h3>LOOPER</h3>
       <div id="looperBox">
         <div class="lamp" id="loopLamp"></div>
@@ -679,7 +703,7 @@ path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
       </div>
     </div>
 
-    <div class="dev-sec">
+    <div class="dev-sec" id="outputSec">
       <h3>OUTPUT</h3>
       <div style="margin-bottom:6px">On pedal: <span id="devPresetName">—</span></div>
       <div class="volrow">
@@ -689,7 +713,7 @@ path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
       </div>
     </div>
 
-    <div class="dev-sec">
+    <div class="dev-sec" id="liveSec">
       <h3>LIVE EDIT</h3>
       <div class="applyrow">
         <button id="applyBtn" class="btn accent" disabled>Apply live</button>
@@ -5481,6 +5505,206 @@ function midiLocalPlay(file, loop) {
 function midiLocalStop() { if (midi.player) { midi.player.stop(); midi.player = null; midiPaint(); } }
 
 /* ==========================================================================
+   Layout — panels, regions and views.
+
+   Every block of the interface is a panel: the sections of the device column,
+   the preset library, the chain editor and the PatchScript pane. Panels live
+   in one of three regions (left column, centre, right column) or are hidden,
+   and can be moved between them from the menu on their header or by dragging
+   the header. An arrangement can be kept as a named view; the current
+   arrangement is remembered between visits either way. A region with nothing
+   in it collapses so the centre gets the room.
+   ========================================================================== */
+const LAYOUT_KEY = 'gls.layout.v1';
+const LAYOUT_REGIONS = ['library', 'center', 'device'];
+const layout = { def: null, views: {}, current: null, name: 'Build', drag: null };
+
+function panelEls() { return [...document.querySelectorAll('.panel')]; }
+function panelHead(p) { return p.querySelector(':scope > h3, :scope > .side-head, :scope > #chainBar, :scope > .pane-head'); }
+function panelTitle(p) {
+  if (p.dataset.title) return p.dataset.title;
+  const h = panelHead(p);
+  return (h ? h.textContent : p.id).replace(/[▼▶]/g, '').trim().split('\n')[0].slice(0, 24);
+}
+function regionOf(p) { const r = p.parentElement; return r && LAYOUT_REGIONS.includes(r.id) ? r.id : 'hidden'; }
+
+/** The arrangement as data: which panels sit where, and which are folded. */
+function layoutSnapshot() {
+  const regions = {};
+  for (const r of LAYOUT_REGIONS) regions[r] = [...$('#' + r).children].filter(e => e.classList.contains('panel')).map(e => e.id);
+  regions.hidden = [...$('#panelHidden').children].map(e => e.id);
+  return { regions, closed: panelEls().filter(p => p.classList.contains('closed')).map(p => p.id) };
+}
+function layoutHome(id) {
+  return (layout.def && Object.keys(layout.def.regions).find(r => layout.def.regions[r].includes(id))) || 'device';
+}
+function layoutApply(lay) {
+  const seen = new Set();
+  for (const r of [...LAYOUT_REGIONS, 'hidden']) {
+    const host = r === 'hidden' ? $('#panelHidden') : $('#' + r);
+    for (const id of (lay.regions[r] || [])) {
+      const p = $('#' + id);
+      if (p && p.classList.contains('panel') && !seen.has(id)) { host.appendChild(p); seen.add(id); }
+    }
+  }
+  // anything the view does not mention (a panel added since it was saved) goes home
+  for (const p of panelEls()) if (!seen.has(p.id)) {
+    const home = layoutHome(p.id);
+    (home === 'hidden' ? $('#panelHidden') : $('#' + home)).appendChild(p);
+  }
+  const closed = new Set(lay.closed || []);
+  for (const p of panelEls()) if (p.classList.contains('coll')) p.classList.toggle('closed', closed.has(p.id));
+  layoutAfter();
+}
+function layoutAfter() {
+  for (const r of LAYOUT_REGIONS) $('#' + r).classList.toggle('empty', ![...$('#' + r).children].some(e => e.classList.contains('panel')));
+  if (typeof scorePaint === 'function' && score.model) scorePaint();     // the score draws larger in the centre
+  layoutSave();
+  layoutPaintSelect();
+}
+function layoutSave() {
+  layout.current = layoutSnapshot();
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify({ views: layout.views, current: layout.current, name: layout.name })); } catch (e) {}
+}
+function layoutBuiltins() {
+  const d = layout.def, all = [...d.regions.library, ...d.regions.center, ...d.regions.device, ...d.regions.hidden];
+  const without = (arr, ...ids) => arr.filter(x => !ids.includes(x));
+  const playRight = ['devSec', 'looperSec', 'outputSec', 'midiSec', 'chanSec'];
+  const scoreRight = ['devSec', 'midiSec', 'chanSec', 'looperSec', 'outputSec'];
+  return {
+    Build: d,
+    Play: { regions: { library: ['libSec'], center: ['scoreSec', 'chainWrap'],
+                       device: [...playRight, ...without(d.regions.device, ...playRight, 'scoreSec')],
+                       hidden: ['codePane'] },
+            closed: ['meterSec', 'liveSec', 'swSec', 'sysSec'] },
+    Score: { regions: { library: [], center: ['scoreSec'], device: scoreRight,
+                        hidden: without(all, 'scoreSec', ...scoreRight) },
+             closed: [] },
+  };
+}
+function layoutViewNames() { return [...Object.keys(layoutBuiltins()), ...Object.keys(layout.views)]; }
+function layoutUse(name) {
+  const lay = layoutBuiltins()[name] || layout.views[name];
+  if (!lay) return;
+  layout.name = name;
+  layoutApply(lay);
+}
+function layoutPaintSelect() {
+  const sel = $('#viewSel'); if (!sel) return;
+  const names = layoutViewNames();
+  sel.innerHTML = names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('')
+    + '<option disabled>&#8212;&#8212;&#8212;&#8212;&#8212;&#8212;</option>'
+    + '<option value=" save">Save layout as view&#8230;</option>'
+    + (layout.views[layout.name] ? '<option value=" delete">Delete this view</option>' : '')
+    + '<option value=" unhide">Show hidden panels</option>'
+    + '<option value=" reset">Reset to Build</option>';
+  sel.value = names.includes(layout.name) ? layout.name : 'Build';
+  // an edited arrangement is flagged, so the name is not a lie
+  const base = layoutBuiltins()[layout.name] || layout.views[layout.name];
+  const dirty = base && JSON.stringify(base.regions) !== JSON.stringify(layoutSnapshot().regions);
+  sel.classList.toggle('dirty', !!dirty);
+  sel.title = dirty ? `Panels have moved since "${layout.name}" - save the arrangement as a view to keep it` : 'Choose how the panels are arranged';
+}
+function layoutSelectChanged(ev) {
+  const v = ev.target.value;
+  if (v === ' save') {
+    const name = (prompt('Name for this view:', layout.views[layout.name] ? layout.name : '') || '').trim();
+    if (name && !layoutBuiltins()[name]) { layout.views[name] = layoutSnapshot(); layout.name = name; layoutSave(); consoleLog('ok', `Saved view "${name}"`); }
+    else if (name) consoleLog('err', `"${name}" is a built-in view - pick another name`);
+  } else if (v === ' delete') {
+    if (layout.views[layout.name] && confirm(`Delete the view "${layout.name}"?`)) { delete layout.views[layout.name]; layout.name = 'Build'; layoutSave(); }
+  } else if (v === ' unhide') {
+    for (const p of [...$('#panelHidden').children]) { const home = layoutHome(p.id); $('#' + (home === 'hidden' ? 'device' : home)).appendChild(p); }
+    layoutAfter();
+  } else if (v === ' reset') { layoutUse('Build'); }
+  else if (v && !v.startsWith(' ')) layoutUse(v);
+  layoutPaintSelect();
+}
+
+/* ---- moving a panel: the header menu, and dragging the header ---- */
+function panelMove(p, region, before) {
+  const host = region === 'hidden' ? $('#panelHidden') : $('#' + region);
+  if (before && before.parentElement === host) host.insertBefore(p, before); else host.appendChild(p);
+  layoutAfter();
+}
+function panelMenuOpen(p, anchor) {
+  const menu = $('#panelMenu');
+  const r = regionOf(p), sib = [...p.parentElement.children].filter(e => e.classList.contains('panel'));
+  const i = sib.indexOf(p);
+  const items = [
+    ['Move to left column', () => panelMove(p, 'library'), r !== 'library'],
+    ['Move to centre', () => panelMove(p, 'center'), r !== 'center'],
+    ['Move to right column', () => panelMove(p, 'device'), r !== 'device'],
+    ['Move up', () => panelMove(p, r, sib[i - 1]), r !== 'hidden' && i > 0],
+    ['Move down', () => panelMove(p, r, sib[i + 2] || null), r !== 'hidden' && i < sib.length - 1],
+    ['Hide panel', () => panelMove(p, 'hidden'), r !== 'hidden'],
+  ].filter(x => x[2]);
+  menu.textContent = '';
+  const t = document.createElement('div'); t.className = 'pm-title'; t.textContent = panelTitle(p); menu.appendChild(t);
+  for (const [label, fn] of items) {
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+    b.addEventListener('click', () => { panelMenuClose(); fn(); });
+    menu.appendChild(b);
+  }
+  const box = anchor.getBoundingClientRect();
+  menu.hidden = false;
+  menu.style.left = Math.max(4, Math.min(box.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+  menu.style.top = Math.min(box.bottom + 4, window.innerHeight - menu.offsetHeight - 8) + 'px';
+  setTimeout(() => document.addEventListener('click', panelMenuClose, { once: true }), 0);
+}
+function panelMenuClose() { $('#panelMenu').hidden = true; }
+
+function panelify() {
+  const hidden = document.createElement('div'); hidden.id = 'panelHidden'; hidden.hidden = true; document.body.appendChild(hidden);
+  const menu = document.createElement('div'); menu.id = 'panelMenu'; menu.hidden = true; document.body.appendChild(menu);
+  const candidates = [...document.querySelectorAll('#library > .dev-sec, #center > .dev-sec, #device > .dev-sec, #chainWrap, #codePane')];
+  for (const p of candidates) {
+    if (!p.id) continue;
+    p.classList.add('panel');
+    const h = panelHead(p); if (!h) continue;
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'pmove'; b.innerHTML = '&#8942;'; b.title = 'Move this panel';
+    b.setAttribute('aria-label', 'Move ' + panelTitle(p));
+    b.addEventListener('click', e => { e.stopPropagation(); panelMenuOpen(p, b); });
+    h.appendChild(b);
+    // drag by the header; a placeholder shows where it will land
+    h.draggable = true;
+    h.addEventListener('dragstart', e => {
+      layout.drag = p; p.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', p.id); } catch (_) {}
+    });
+    h.addEventListener('dragend', () => { p.classList.remove('dragging'); layout.drag = null; const ph = $('#dropPh'); if (ph) ph.remove(); });
+  }
+  for (const r of LAYOUT_REGIONS) {
+    const host = $('#' + r);
+    host.addEventListener('dragover', e => {
+      if (!layout.drag) return;
+      e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+      let ph = $('#dropPh'); if (!ph) { ph = document.createElement('div'); ph.id = 'dropPh'; }
+      const sibs = [...host.children].filter(x => x.classList.contains('panel') && x !== layout.drag);
+      const next = sibs.find(s => { const bb = s.getBoundingClientRect(); return e.clientY < bb.top + bb.height / 2; });
+      if (next) host.insertBefore(ph, next); else host.appendChild(ph);
+    });
+    host.addEventListener('drop', e => {
+      if (!layout.drag) return;
+      e.preventDefault();
+      const ph = $('#dropPh');
+      if (ph) { host.insertBefore(layout.drag, ph); ph.remove(); } else host.appendChild(layout.drag);
+      layoutAfter();
+    });
+  }
+  // the pedal-computer section reads last whatever order the builders ran in
+  if ($('#sysSec') && $('#sysSec').parentElement === $('#device')) $('#device').appendChild($('#sysSec'));
+  layout.def = layoutSnapshot();
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) || 'null'); } catch (e) {}
+  if (saved && saved.views) layout.views = saved.views;
+  if (saved && saved.name) layout.name = saved.name;
+  if (saved && saved.current && saved.current.regions) layoutApply(saved.current); else layoutAfter();
+  $('#viewSel').addEventListener('change', layoutSelectChanged);
+}
+
+/* ==========================================================================
    Channels — which instrument answers which MIDI channel, in one place.
 
    Every instrument card carries a channel (kits included, since a kit is only
@@ -5881,7 +6105,8 @@ function scoreSvg(model) {
     }
   });
   el.push(`<line id="scPlay" class="sc-play" x1="${SCORE_GUTTER}" y1="20" x2="${SCORE_GUTTER}" y2="${H - 4}"/>`);
-  return `<svg id="scSvg" width="${W.toFixed(0)}" height="${H}" viewBox="0 0 ${W.toFixed(0)} ${H}">${el.join('')}</svg>`;
+  const k = score.scale || 1;      // vector: scaling the box scales everything, playhead included
+  return `<svg id="scSvg" width="${(W * k).toFixed(0)}" height="${(H * k).toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H}">${el.join('')}</svg>`;
 }
 function scoreFlag(x, y, up, n) {
   let d = '';
@@ -5918,6 +6143,7 @@ function scorePaint() {
     box.innerHTML = `<div class="play-hint">${files.length ? 'Reading the file…' : 'Upload a .mid in the MIDI panel to see its notes.'}</div>`;
     note.textContent = ''; return;
   }
+  score.scale = $('#scoreSec') && $('#scoreSec').parentElement && $('#scoreSec').parentElement.id === 'center' ? 1.5 : 1;
   box.innerHTML = scoreSvg(score.model);
   chanPaintFile();
   const m = score.model;
@@ -5970,7 +6196,7 @@ function scoreAnimate() {
     for (const el of lit) if (!next.includes(el)) el.classList.remove('on');
     lit = next;
     if (score.follow && box) {                       // keep the playhead in view
-      const want = x - box.clientWidth * 0.35;
+      const want = x * (score.scale || 1) - box.clientWidth * 0.35;
       if (Math.abs(box.scrollLeft - want) > 24) box.scrollLeft = want;
     }
     score.raf = requestAnimationFrame(step);
@@ -5990,7 +6216,7 @@ function scoreBuildSection() {
     <div id="scoreBox"><div class="play-hint">Upload a .mid in the MIDI panel to see its notes.</div></div>
     <div class="midi-line mono" id="scoreNote"></div>
   </div>`;
-  const after = $('#midiSec') || $('#device').lastElementChild;
+  const after = $('#chanSec') || $('#midiSec') || $('#device').lastElementChild;
   after.insertAdjacentElement('afterend', sec);
   sec.querySelector('h3').addEventListener('click', () => sec.classList.toggle('closed'));
   $('#scoreSel').addEventListener('change', ev => scoreSelect(ev.target.value));
@@ -6154,6 +6380,7 @@ function sysBuildSection() {
       <button class="btn sm accent" id="sysApplyBtn" hidden>Install</button>
     </div>
     <div class="actions-row">
+      <button class="btn sm" id="sysReloadBtn" title="Reload Studio in this browser — use it on the pedal’s own screen after an update">Reload this screen</button>
       <button class="btn sm" id="sysRebootBtn" title="Restart the pedal computer — the pedal itself keeps playing">Restart</button>
       <button class="btn sm danger" id="sysOffBtn" title="Shut the pedal computer down before pulling its power">Shut down</button>
     </div>
@@ -6178,6 +6405,7 @@ function sysBuildSection() {
     consoleLog(r.ok ? 'ok' : 'err', r.ok ? `Installing ${v}…` : `Update refused: ${r.message}`);
     sysPaint();
   });
+  $('#sysReloadBtn').addEventListener('click', () => location.reload());
   $('#sysRebootBtn').addEventListener('click', () => sysPower('reboot'));
   $('#sysOffBtn').addEventListener('click', () => sysPower('poweroff'));
   sysPaint();
@@ -6207,6 +6435,10 @@ function sysPaint() {
   if (!onPi) return;
   const st = sys.status || {}, up = sys.update || (st.available !== undefined ? st : null);
   $('#sysVer').textContent = st.version ? 'v' + st.version : '—';
+  // The kiosk has no address bar: when the Pi comes back from an update running a
+  // different version, this page is stale and reloads itself. Only ever forward,
+  // and only when a version was known first, so a flaky link cannot loop it.
+  if (st.version) { if (sys.seenVersion && st.version !== sys.seenVersion) { consoleLog('ok', `Studio ${st.version} installed — reloading`); setTimeout(() => location.reload(), 800); return; } sys.seenVersion = st.version; }
   const busy = st.busy;
   let txt = '';
   if (busy) txt = 'installing… Studio will reconnect';
@@ -8461,6 +8693,7 @@ function init() {
     h.addEventListener('click', toggle);
     h.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
   }
+  panelify();                                   // panels, regions, views (restores the last arrangement)
 
   /* loops */
   $('#loopSaveBtn').addEventListener('click', loopSaveCurrent);
