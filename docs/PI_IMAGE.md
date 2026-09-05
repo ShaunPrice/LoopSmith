@@ -98,6 +98,8 @@ Instead of scrolling kernel text the screen shows the LoopSmith mark on a dark g
 progress bar, until Studio appears (a Plymouth theme in `pi/image/splash`). `SPLASH=0` in
 `looper.conf` restores the text.
 
+Along the bottom of the splash the band score from Studio plays itself: the playhead sweeps the eight bars of `09-band-8bars.mid`, notes light as it passes, and it loops until the kiosk takes over. It is drawn from two images Studio rendered (`score-base.png`, and `score-lit.png` with every note lit) that the theme script pans and slices with `Image.Crop`, so nothing is animated frame by frame and the initramfs stays small. On a short screen the strip scales down to fit under the progress bar. The theme lives in the initramfs, so an update that changes it reinstalls the theme and rebuilds the initramfs in the background after the update itself has finished.
+
 ## MIDI through the Pi
 
 - **Files**: Studio's MIDI panel uploads `.mid` files to the USB drive and the Pi plays them into
