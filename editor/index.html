@@ -6309,8 +6309,17 @@ function midiPaint() {
       else { badge.title = 'Some notes will be silent — hover or click for which'; badge.setAttribute('role', 'button'); badge.tabIndex = 0; }
       row.appendChild(badge);
     }
-    const play = document.createElement('button'); play.className = 'btn sm'; play.textContent = '▶'; play.title = 'Play into the pedal';
+    // The row's button is a stop button for as long as its file is playing — the
+    // Pi reports what it is playing once a second, the browser player is ours —
+    // and turns back into play when the file ends or is stopped.
+    const playingThis = tr === 'bridge' ? !!(st.playing && st.file === f.name) : !!(midi.player && midi.player.name === f.name);
+    const play = document.createElement('button'); play.className = 'btn sm' + (playingThis ? ' accent' : '');
+    play.textContent = playingThis ? '■' : '▶'; play.title = playingThis ? 'Stop' : 'Play into the pedal';
     play.addEventListener('click', async () => {
+      if (playingThis) {
+        if (tr === 'bridge') { await midiApi('/api/midi/stop', {}); midi.status = await midiApi('/api/midi/status'); } else midiLocalStop();
+        midiPaint(); return;
+      }
       if (tr === 'bridge') { const j = await midiApi('/api/midi/play', { file: f.name, loop: midi.loop }); consoleLog(j.ok ? 'ok' : 'err', j.message || ''); midi.status = await midiApi('/api/midi/status'); midiPaint(); }
       else midiLocalPlay(f, midi.loop);
     });
