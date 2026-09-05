@@ -5,6 +5,10 @@ They are made to be *looped*: every file is a whole number of bars, ends with an
 all-notes-off exactly on the bar line, and uses the channels the pedal's band presets
 bind — 1 rhythm, 2 lead, 3 bass, 10 drums (see docs/PATCHSCRIPT.md "Instruments").
 
+The drum patterns use only the three notes every kit answers — 36 kick, 38 snare,
+42 closed hat — so they play through any preset that has a kit. The two files whose names
+say otherwise need the richer kits.
+
     python3 midi/make_examples.py
 """
 import os, struct
@@ -81,8 +85,9 @@ def drum_track(bars, bpm, style):
         o = bar * B
         last = bar == bars - 1
         if style == "click":
+            # only the three notes every kit answers, so this works with any drum preset
             for b in range(4):
-                t.note(9, o + b * PPQ, RIM if b else BELL, 110 if b == 0 else 70, beats(0.1))
+                t.note(9, o + b * PPQ, SNARE if b == 0 else HAT, 112 if b == 0 else 74, beats(0.1))
         elif style == "rock":
             for b in range(4):
                 t.note(9, o + b * PPQ, HAT, 70 if b % 2 else 88, beats(0.1))
@@ -93,7 +98,7 @@ def drum_track(bars, bpm, style):
             t.note(9, o + beats(3), KICK, 90, beats(0.1))
             if last:                                  # a fill into the loop point
                 for i in range(4):
-                    t.note(9, o + beats(3.0 + i * 0.25), SNARE if i % 2 else LTOM, 80 + 10 * i, beats(0.1))
+                    t.note(9, o + beats(3.0 + i * 0.25), SNARE, 80 + 10 * i, beats(0.1))
         elif style == "funk":
             for b in range(8):
                 t.note(9, o + b * beats(0.5), HAT, 84 if b % 2 == 0 else 56, beats(0.08))
@@ -101,8 +106,8 @@ def drum_track(bars, bpm, style):
                 t.note(9, o + beats(at), KICK, vel, beats(0.1))
             t.note(9, o + beats(1), SNARE, 110, beats(0.1))
             t.note(9, o + beats(3), SNARE, 106, beats(0.1))
-            t.note(9, o + beats(1.75), CLAP, 70, beats(0.1))
-            t.note(9, o + beats(2), OHAT, 66, beats(0.2))
+            t.note(9, o + beats(1.75), SNARE, 62, beats(0.1))      # ghost note
+            t.note(9, o + beats(2), HAT, 70, beats(0.2))
         elif style == "shuffle":
             for b in range(4):
                 t.note(9, o + b * PPQ, HAT, 86, beats(0.1))
@@ -168,7 +173,7 @@ write("01-click-100bpm.mid",   [drum_track(4, 100, "click")],  "four bars of cli
 write("02-rock-100bpm.mid",    [drum_track(4, 100, "rock")],   "straight rock beat with a fill into the loop point")
 write("03-funk-96bpm.mid",     [drum_track(2, 96, "funk")],    "two-bar funk pattern, syncopated kick")
 write("04-shuffle-88bpm.mid",  [drum_track(4, 88, "shuffle")], "lazy shuffle, good under a slow lead")
-write("05-percussion-104bpm.mid", [drum_track(4, 104, "perc")], "congas, rim and shaker — for the Percussion kit")
+write("05-percussion-104bpm-perckit.mid", [drum_track(4, 104, "perc")], "congas, rim and shaker — needs the Percussion kit")
 write("06-bass-Em-C-G-D.mid",  [bass_track(4, 100)],           "root bass line through the progression")
 write("07-chords-Em-C-G-D.mid",[chord_track(4, 100)],          "strummed chords on the rhythm channel")
 write("08-lead-Em-pentatonic.mid", [lead_track(4, 100)],       "a pentatonic line for the lead channel")
@@ -179,5 +184,5 @@ t = Track("drum map"); t.tempo(90)
 for i, n in enumerate([KICK, RIM, SNARE, CLAP, LTOM, HAT, OHAT, HTOM, BELL, 60, CONGA_H, CONGA_L, SHAKER]):
     t.note(9, i * PPQ, n, 100, beats(0.4))
 t.all_off(14 * PPQ, [9])
-write("10-drum-map.mid", [t], "every drum note the kits use, one per beat")
+write("10-drum-map-808kit.mid", [t], "every drum note the kits answer — needs the 808 kit")
 print("\nchannels: 1 rhythm · 2 lead · 3 bass · 10 drums")
