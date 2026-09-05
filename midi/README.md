@@ -38,22 +38,6 @@ The drum patterns use only the three notes every kit answers — **36 kick, 38 s
 hat** — so they play through any kit. The two files whose names say `perckit` and `808kit` use the wider General MIDI map — load
 `11_fullkit.txt`, which answers all thirteen notes, or add an 808 or Percussion kit in Studio.
 
-## Using them
-
-**On the pedal computer.** Load a preset with instruments first (see above), then use Studio's
-**MIDI** panel: it lists what is on the Pi; press ▶ to play a file into the pedal, and tick *loop*
-to have it repeat. The Pi plays it, so it keeps going if
-your phone's screen sleeps.
-
-**To build a loop.** Load a band preset, start the file looping, tap **LOOP** on the first beat
-to record a pass, tap again on the bar line to close it — then play guitar over the top. The
-capture in `demo/loop_from_midi.mp3` was made exactly this way (`09-band-8bars.mid` into
-`10_song.txt`, recorded in the pedal's looper and downloaded with `loop get`).
-
-**Over USB, with no Pi.** Press *Web MIDI* in the MIDI panel (Chrome or Edge), upload a file
-there and press ▶ — the browser plays it straight into the pedal's USB MIDI port.
-
-## Rebuilding them
-
-`python3 midi/make_examples.py` rewrites every file in this folder. The generator has no
-dependencies; edit the patterns at the bottom to make your own.
+You do not have to work this out from the table: Studio marks each file in the MIDI panel
+**✓** when the preset you have open answers everything it plays, or **⚠** with the exact channels
+and notes that would be silent.

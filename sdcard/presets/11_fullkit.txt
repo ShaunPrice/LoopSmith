@@ -1,8 +1,6 @@
 // name: Full kit (808 + percussion)
-// Every drum note the example MIDI files use, on channel 10:
-//   36 kick · 37 rim · 38 snare · 39 clap · 42 closed hat · 45 low tom · 46 open hat
-//   50 high tom · 56 cowbell · 60 bongo · 63 conga high · 64 conga low · 70 shaker
-// Play it with 05-percussion and 10-drum-map, or under a guitar.
+// chain-meta: {"v":1,"chain":[],"instruments":[{"kind":"inst","id":"kit808","on":true,"p":{"level":0.8,"decay":400}},{"kind":"inst","id":"perc","on":true,"p":{"level":0.8}}]}
+
 AudioMixer4 srcmix1;
 AudioMixer4 imix1;
 AudioMixer4 pmix1;

@@ -470,6 +470,10 @@ input[type=range]::-moz-range-thumb{
 .midi-loop{font-size:11px;color:var(--muted);display:inline-flex;align-items:center;gap:4px}
 .midi-sel{width:100%;margin-top:4px;font-size:11px}
 #midiFiles{max-height:150px;overflow-y:auto;margin:4px 0}
+.midi-cov{font-size:12px;padding:0 4px;cursor:help}
+.midi-cov.ok{color:var(--ok,#4caf50)}
+.midi-cov.warn{color:var(--warn,#e0a030)}
+.midi-cov-note{font-size:11px;line-height:1.35;color:var(--warn,#e0a030);margin:-2px 0 6px 2px}
 .actions-row{display:flex;gap:6px;margin-top:5px;flex-wrap:wrap}
 .actions-row .btn{flex:1}
 .actions-row a.btn{text-align:center;text-decoration:none;line-height:1.9}
@@ -5184,6 +5188,7 @@ async function serialConnect() {
 const midi = { netHost: null, ws: null, wsTimer: null, wsDelay: 1500, access: null, out: null, pedalIn: null,
                ctlIn: null, inCount: 0, outCount: 0, last: '', files: [], local: [], status: null, poll: null,
                player: null, loop: false };
+const midiUseCache = new Map();          // name/size -> channels+notes the file plays
 
 function midiTransport() { return midi.netHost ? 'bridge' : (midi.out ? 'webmidi' : null); }
 function midiSend(bytes) {
@@ -5243,6 +5248,18 @@ async function midiApi(path, body) { return apiFetch(path, body); }
 async function midiRefreshFiles() {
   if (!midi.netHost) return;
   try { const j = await midiApi('/midi-files/'); midi.files = j.files || []; } catch (e) { midi.files = []; }
+  midiPaint();
+  // Read each file back once (they are a few kB) so the panel can say whether
+  // the preset in Studio actually answers what the file plays. Cached by size.
+  for (const f of midi.files) {
+    const key = f.name + '/' + (f.bytes || 0) + '/' + (f.mtime || 0);
+    if (midiUseCache.has(key)) { f.uses = midiUseCache.get(key); continue; }
+    try {
+      const r = await fetch('/midi-files/' + encodeURIComponent(f.name));
+      f.uses = midiUsage(parseSmf(await r.arrayBuffer()).events);
+      midiUseCache.set(key, f.uses);
+    } catch (e) { /* unreadable or not an SMF: no claim either way */ }
+  }
   midiPaint();
 }
 function midiPollStart() { midiPollStop(); midi.poll = setInterval(async () => { if (!midi.netHost) return; try { midi.status = await midiApi('/api/midi/status'); } catch (e) {} midiPaint(); }, 1000); }
@@ -5307,6 +5324,61 @@ function parseSmf(buf) {
   }
   return { events: ev, length: ev.length ? ev[ev.length - 1].t : 0 };
 }
+/* ---- does the preset in Studio answer what a file plays? ----------------
+   A MIDI file only makes a sound if some voice in the loaded preset is bound
+   to the channel (and, for drum voices, the note) it sends. We read the
+   bindings straight out of the emitted PatchScript — `obj.midi(ch, group)` for
+   a melodic voice, `obj.midi(ch, group, note)` for one drum pad — so this works
+   for hand-written custom routing exactly as it does for a built chain. */
+function midiUsage(events) {
+  const use = new Map();                                  // channel (1-16) -> Set of notes
+  for (const e of events) {
+    if ((e.m[0] & 0xF0) !== 0x90 || !e.m[2]) continue;    // note-on only
+    const ch = (e.m[0] & 0x0F) + 1;
+    if (!use.has(ch)) use.set(ch, new Set());
+    use.get(ch).add(e.m[1]);
+  }
+  return use;
+}
+function presetBindings(preset) {
+  const any = new Set(), notes = new Map();               // channels bound wholesale / per note
+  if (!preset) return { any, notes };
+  let text; try { text = generateText(preset); } catch (e) { return { any, notes }; }
+  const re = /\.midi\s*\(\s*(\d+)\s*(?:,[^,)]*(?:,\s*(\d+)\s*)?)?\)/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const ch = +m[1];
+    if (m[2] === undefined) any.add(ch);
+    else { if (!notes.has(ch)) notes.set(ch, new Set()); notes.get(ch).add(+m[2]); }
+  }
+  return { any, notes };
+}
+/** null when the file is unparsed; otherwise the notes the preset cannot play. */
+function midiCoverage(file) {
+  if (!file || !file.uses) return null;
+  const b = presetBindings(current()), gaps = [];
+  for (const [ch, notes] of file.uses) {
+    if (b.any.has(ch)) continue;                          // melodic voice takes any note
+    const have = b.notes.get(ch);
+    const missing = [...notes].filter(n => !have || !have.has(n)).sort((x, y) => x - y);
+    if (missing.length) gaps.push({ ch, missing, partial: !!have });
+  }
+  return { ok: !gaps.length, gaps };
+}
+function midiCoverageNote(cov) {
+  if (!cov || cov.ok) return '';
+  const parts = cov.gaps.map(g => {
+    const shown = g.missing.slice(0, 5).map(n => n + ' ' + noteName(n)).join(', ');
+    return `ch${g.ch} ${shown}${g.missing.length > 5 ? ` +${g.missing.length - 5} more` : ''}`;
+  });
+  const drums = cov.gaps.some(g => g.ch === 10);
+  const full = drums && dev.presets.some(n => /fullkit/i.test(n));
+  return `Nothing in this preset answers ${parts.join(' · ')} — those notes will be silent. `
+       + (full ? 'Load 11_fullkit.txt for the whole drum map, or add'
+               : 'Add')
+       + ' an instrument that covers them, then push the preset.';
+}
+
 function midiLocalPlay(file, loop) {
   midiLocalStop();
   const held = new Set(); let i = 0, t0 = performance.now(), timer = null;
@@ -5366,7 +5438,7 @@ function midiBuildSection() {
       consoleLog(j.ok ? 'ok' : 'err', j.ok ? `Uploaded ${name} (${j.length_s} s)` : `Upload failed: ${j.message || r.status}`);
       midiRefreshFiles();
     } else {
-      midi.local = midi.local.filter(x => x.name !== name).concat([{ name, length: parsed.length, events: parsed.events }]);
+      midi.local = midi.local.filter(x => x.name !== name).concat([{ name, length: parsed.length, events: parsed.events, uses: midiUsage(parsed.events) }]);
       consoleLog('ok', `${name} loaded (${parsed.length.toFixed(1)} s) — plays from this browser over Web MIDI`);
       midiPaint();
     }
@@ -5395,6 +5467,15 @@ function midiPaint() {
   for (const f of rows) {
     const row = document.createElement('div'); row.className = 'looprow';
     const nm = document.createElement('span'); nm.textContent = f.name; nm.title = f.name; row.appendChild(nm);
+    const cov = midiCoverage(f);
+    if (cov) {
+      const badge = document.createElement('span');
+      badge.className = 'midi-cov ' + (cov.ok ? 'ok' : 'warn');
+      badge.textContent = cov.ok ? '\u2713' : '\u26a0';
+      badge.title = cov.ok ? 'The preset open here answers every note this file plays'
+                           : midiCoverageNote(cov);
+      row.appendChild(badge);
+    }
     const play = document.createElement('button'); play.className = 'btn sm'; play.textContent = '▶'; play.title = 'Play into the pedal';
     play.addEventListener('click', async () => {
       if (tr === 'bridge') { const j = await midiApi('/api/midi/play', { file: f.name, loop: midi.loop }); consoleLog(j.ok ? 'ok' : 'err', j.message || ''); midi.status = await midiApi('/api/midi/status'); midiPaint(); }
@@ -5412,6 +5493,10 @@ function midiPaint() {
     });
     row.appendChild(rm);
     box.appendChild(row);
+    if (cov && !cov.ok) {
+      const w = document.createElement('div'); w.className = 'midi-cov-note';
+      w.textContent = midiCoverageNote(cov); box.appendChild(w);
+    }
   }
   // progress
   const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
