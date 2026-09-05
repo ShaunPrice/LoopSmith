@@ -493,7 +493,8 @@ input[type=range]::-moz-range-thumb{
 #midiFiles{max-height:150px;overflow-y:auto;margin:4px 0}
 .midi-cov{font-size:12px;padding:0 4px;cursor:help}
 .midi-cov.ok{color:var(--ok,#4caf50)}
-.midi-cov.warn{color:var(--warn,#e0a030)}
+.midi-cov.warn{color:var(--warn,#e0a030);cursor:pointer;border-radius:4px}
+.midi-cov.warn.pinned{background:rgba(224,160,48,.18)}
 .midi-cov-note{font-size:11px;line-height:1.35;color:var(--warn,#e0a030);margin:-2px 0 6px 2px}
 .chan-row{display:flex;align-items:center;gap:8px;margin:4px 0}
 .chan-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
@@ -6299,12 +6300,13 @@ function midiPaint() {
     const row = document.createElement('div'); row.className = 'looprow';
     const nm = document.createElement('span'); nm.textContent = f.name; nm.title = f.name; row.appendChild(nm);
     const cov = midiCoverage(f);
+    let badge = null;
     if (cov) {
-      const badge = document.createElement('span');
+      badge = document.createElement('span');
       badge.className = 'midi-cov ' + (cov.ok ? 'ok' : 'warn');
       badge.textContent = cov.ok ? '\u2713' : '\u26a0';
-      badge.title = cov.ok ? 'The preset open here answers every note this file plays'
-                           : midiCoverageNote(cov);
+      if (cov.ok) badge.title = 'The preset open here answers every note this file plays';
+      else { badge.title = 'Some notes will be silent — hover or click for which'; badge.setAttribute('role', 'button'); badge.tabIndex = 0; }
       row.appendChild(badge);
     }
     const play = document.createElement('button'); play.className = 'btn sm'; play.textContent = '▶'; play.title = 'Play into the pedal';
@@ -6325,8 +6327,18 @@ function midiPaint() {
     row.appendChild(rm);
     box.appendChild(row);
     if (cov && !cov.ok) {
-      const w = document.createElement('div'); w.className = 'midi-cov-note';
+      // The explanation is wanted once, not on every glance: it shows while the
+      // warning is hovered and stays put when it is clicked (click again to fold).
+      const w = document.createElement('div'); w.className = 'midi-cov-note'; w.hidden = true;
       w.textContent = midiCoverageNote(cov); box.appendChild(w);
+      let pinned = midi.covOpen === f.name;
+      w.hidden = !pinned;
+      badge.addEventListener('mouseenter', () => { w.hidden = false; });
+      badge.addEventListener('mouseleave', () => { if (!pinned) w.hidden = true; });
+      const toggle = () => { pinned = !pinned; midi.covOpen = pinned ? f.name : null; w.hidden = !pinned; badge.classList.toggle('pinned', pinned); };
+      badge.addEventListener('click', toggle);
+      badge.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+      badge.classList.toggle('pinned', pinned);
     }
   }
   // progress
