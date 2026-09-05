@@ -80,7 +80,7 @@ a stock item.
 | 1 × W25Q32JVSSIQ SPI flash, SOIC-8 | — | Optional: the preset mirror on the audio adaptor, so the pedal works with no SD card. Larger W25Q parts work too |
 | microSD card, 8–32 GB | `CE09939` | Presets, loops and samples live here |
 | 6 × SPST momentary footswitch, panel mount | — | Soft-touch “tact” type is fine; a music-electronics supplier is the easiest source |
-| 2 × 5 mm LED (red, green) + 2 × 220 Ω resistor | — | Record and play indicators |
+| 2 × 5 mm LED (red, green) + 2 × 220 Ω resistor | — | Record and play indicators; the green one blinks briefly every two seconds when the pedal is idle |
 | 2 × 6.35 mm mono jack socket, panel mount | — | Instrument in, amp out |
 | USB-C cable, panel-mount extension | — | Power and the computer link |
 | Enclosure, ~120 × 95 × 35 mm die-cast aluminium | — | A “1590BB”-style box; drilling plan in [docs/HARDWARE.md](docs/HARDWARE.md) |

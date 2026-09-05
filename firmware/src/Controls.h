@@ -105,6 +105,11 @@ public:
         case AudioEffectLooper::STOPPED:     play = hasLoop && slow; break;
         default: break;
         }
+        // Heartbeat: with no loop the panel would be dark, and the Teensy's own LED is
+        // no use as a running light - pin 13 is SPI SCK to the audio shield's flash, so it
+        // only flickers with flash traffic (the one flash at boot is the preset mirror).
+        // A short green blink every two seconds says the pedal is alive and idle.
+        if (s == AudioEffectLooper::STOPPED && !hasLoop) play = (now % 2000) < 40;
         digitalWrite(PIN_LED_REC, rec ? HIGH : LOW);
         digitalWrite(PIN_LED_PLAY, play ? HIGH : LOW);
     }

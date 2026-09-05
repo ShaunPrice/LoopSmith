@@ -60,5 +60,5 @@
 #define PATCH_MAX_STREAMS  48
 #define PATCH_MAX_CONNS    96
 
-#define FIRMWARE_VERSION   "2.2.0"
+#define FIRMWARE_VERSION   "2.2.1"
 #define PROTOCOL_VERSION   1
