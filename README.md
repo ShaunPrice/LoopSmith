@@ -27,6 +27,10 @@ Three things make it different from a shop-bought looper.
 | **It plays itself** | Plucked strings, FM pianos and bells, organ, basses, pads, leads, three drum kits and your own WAV samples run on the same chip, played from a keyboard, a MIDI file, the browser or a footswitch — and looped like anything else. |
 | **The screen is a browser** | *Studio*, the editor, is a single HTML file. Over USB it drives the pedal directly; over Wi-Fi it reaches it through the Pi, and installs to a phone's home screen like an app. |
 
+<p align="center">
+  <img src="docs/img/studio-build.png" width="900" alt="Studio: a plucked string and an 808 kit feeding a filter, chorus, delay and reverb, with the pedal's meters, looper and presets alongside">
+</p>
+
 ## What it does
 
 - **Looper** — up to 95 seconds, mono, unlimited overdubs with one-level undo, musical stop that
@@ -134,6 +138,18 @@ is switched off.
 - Afterwards every browser that is not the pedal's own screen must sign in. The HDMI screen never
   asks, and **from that screen you can always reset the login** without knowing the old password —
   the recovery path when you forget it.
+
+## Screenshots
+
+| Play view — the score follows the file as the pedal plays it | Score view — one staff per instrument, drums in two voices |
+|---|---|
+| ![Play view](docs/img/studio-play.png) | ![Score view](docs/img/studio-score.png) |
+
+<p align="center">
+  <img src="docs/img/studio-midi-channels.png" width="420" alt="The MIDI panel marks each file the loaded preset can play, and the channels panel assigns instruments to channels">
+</p>
+
+Panels can be moved between the columns or hidden, and arrangements saved as views.
 
 ## Using it
 
