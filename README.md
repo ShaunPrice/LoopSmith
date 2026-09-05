@@ -141,7 +141,7 @@ is switched off.
 
 ## Screenshots
 
-| Play view — the score follows the file as the pedal plays it | Score view — one staff per instrument, drums in two voices |
+| Play view with a MIDI file playing — the playhead and the sounding notes follow the pedal | Score view — one staff per instrument, drums in two voices |
 |---|---|
 | ![Play view](docs/img/studio-play.png) | ![Score view](docs/img/studio-score.png) |
 
@@ -150,6 +150,19 @@ is switched off.
 </p>
 
 Panels can be moved between the columns or hidden, and arrangements saved as views.
+
+**The score, playing.** The Pi plays the file into the pedal and Studio follows it — the playhead sweeps, each note lights as it sounds, and the view scrolls to keep up. Loops here; the same ten seconds as a single-play video: [score-playing.mp4](docs/img/score-playing.mp4).
+
+<p align="center">
+  <img src="docs/img/score-playing.gif" width="900" alt="The score panel while the band file plays: the playhead moves across the staves and notes light as they sound">
+</p>
+
+**The setup page** (as it looks before the pedal has joined a network):
+
+| Network and storage | Bluetooth, access, software, login and the pedal computer |
+|---|---|
+| ![Setup: network and storage](docs/img/setup-network.png) | ![Setup: access and software](docs/img/setup-access.png) |
+
 
 ## Using it
 
