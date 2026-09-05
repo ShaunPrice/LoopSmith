@@ -142,7 +142,7 @@ is switched off.
 | **First loop** | Tap **LOOP**, play, tap again to close the loop, tap a third time to overdub. **STOP** finishes the phrase; hold it to erase. |
 | **Studio** | `http://loopsmith.local/` on your network, or open `editor/index.html` over USB. Build chains, play instruments, remap the switches, edit loops, watch the meters. |
 | **Instruments** | Add up to five, play them from the on-screen keys, your computer keyboard, a MIDI controller, a MIDI file or a footswitch. |
-| **MIDI files** | Ten examples come with it ([midi/](midi/)) — a click, four drum patterns, bass, chords, a lead line and a full band, all cut to whole bars so they loop. |
+| **MIDI files** | Ten examples come with it ([midi/](midi/)) — load `10_song.txt` for the band ones or `11_fullkit.txt` for the percussion ones — a click, four drum patterns, bass, chords, a lead line and a full band, all cut to whole bars so they loop. |
 | **The setup page** | `/setup` — network, SSH, Bluetooth devices, the login, software updates, a console on the screen, restart and shut down. |
 
 Full instructions are in [docs/](docs/): the preset format ([PATCHSCRIPT.md](docs/PATCHSCRIPT.md)),
