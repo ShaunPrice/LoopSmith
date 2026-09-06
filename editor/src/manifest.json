@@ -1,0 +1,18 @@
+[
+  "00-schema.js",
+  "01-schema-helpers.js",
+  "02-instrument-model.js",
+  "03-patch-generator.js",
+  "04-patch-parser.js",
+  "05-patch-recovery.js",
+  "06-workspace.js",
+  "07-console.js",
+  "08-device-midi.js",
+  "09-diagnostics.js",
+  "10-layout.js",
+  "11-score.js",
+  "12-song-sessions.js",
+  "13-system-link.js",
+  "14-views.js",
+  "15-boot.js"
+]

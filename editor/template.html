@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LoopSmith Studio</title>
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icon-192.png">
+<!--
+  LoopSmith Studio — single-file preset editor for the Teensy 4.1 looper pedal.
+
+  Open this file directly in Chrome or Edge (file:// is fine). Everything is inline:
+  no build step, no CDN, no network requests of any kind.
+
+  Contracts implemented here:
+    docs/PATCHSCRIPT.md        — the preset text format (generator + parser + validator)
+    docs/PROTOCOL.md           — the USB serial protocol (Web Serial link, counted-byte framing)
+    docs/effects-schema.json   — the effect registry, embedded verbatim below as EFFECTS_SCHEMA
+-->
+<style>
+/* ============================================================================
+   1. Design tokens — dark recording-studio look
+   ========================================================================== */
+:root{
+  --bg:#0f1115;
+  --panel:#171a21;
+  --card:#1d212b;
+  --border:#262b36;
+  --text:#e6e8ee;
+  --muted:#8a90a0;
+  --accent:#ffb454;
+  --teal:#2dd4bf;
+  --red:#ff453a;
+  --radius:10px;
+  --sp:8px;
+  --font:-apple-system,"Segoe UI",Inter,Roboto,sans-serif;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  --shadow:0 2px 10px rgba(0,0,0,.35);
+  --shadow-lift:0 6px 18px rgba(0,0,0,.45);
+  /* effect-category stripe colors */
+  --cat-dynamics:#f59e0b; --cat-ambience:#2dd4bf; --cat-modulation:#a78bfa;
+  --cat-time:#60a5fa;     --cat-lo-fi:#f472b6;    --cat-drive:#ff453a;
+  --cat-texture:#34d399;  --cat-filter:#fbbf24;   --cat-utility:#94a3b8;
+  --cat-source:#38bdf8;   --cat-macro:#ffb454;   --cat-instrument:#fb923c;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;
+  display:flex;flex-direction:column;overflow:hidden;
+}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer}
+button:disabled{opacity:.4;cursor:default}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#2b313e;border-radius:5px;border:2px solid var(--panel)}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ============================================================================
+   2. Header bar
+   ========================================================================== */
+#topbar{
+  min-height:56px;flex:0 0 auto;flex-wrap:wrap;display:flex;align-items:center;gap:16px;
+  padding:8px 16px;background:var(--panel);border-bottom:1px solid var(--border);
+  box-shadow:var(--shadow);z-index:20;
+}
+#performanceTransport{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex-basis:100%}
+#performMessage{font-size:12px;color:var(--text)}
+#performPosition{font-size:12px;color:var(--muted)}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.brand svg{flex:0 0 auto}
+.brand h1{font-size:16px;font-weight:650;letter-spacing:.2px;white-space:nowrap}
+.brand h1 span{color:var(--accent);font-weight:500}
+.pill{
+  padding:3px 10px;border-radius:99px;font-size:11px;font-weight:600;letter-spacing:.4px;
+  border:1px solid var(--border);color:var(--muted);background:var(--card);white-space:nowrap;
+  transition:all .15s ease;
+}
+.pill.on{color:#04211d;background:var(--teal);border-color:var(--teal)}
+.spacer{flex:1}
+.transport{display:flex;align-items:center;gap:8px}
+.tbtn{
+  width:38px;height:32px;border-radius:8px;border:1px solid var(--border);background:var(--card);
+  font-size:14px;line-height:1;display:flex;align-items:center;justify-content:center;
+  transition:all .13s ease;color:var(--text);
+}
+.tbtn:not(:disabled):hover{border-color:var(--accent);transform:translateY(-1px)}
+.tbtn.rec{color:var(--red)}
+.tbtn.wide{width:auto;padding:0 12px;font-size:11px;font-weight:700;letter-spacing:.6px}
+.tbtn.active{background:var(--accent);color:#22160a;border-color:var(--accent)}
+
+/* ============================================================================
+   3. Main three-column layout
+   ========================================================================== */
+#app{flex:1;display:flex;min-height:0}
+aside{background:var(--panel);display:flex;flex-direction:column;min-height:0}
+#library{flex:0 0 248px;border-right:1px solid var(--border)}
+#device{flex:0 0 300px;border-left:1px solid var(--border);overflow-y:auto}
+#center{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;overflow-y:auto}
+#library.empty,#device.empty{display:none}
+#library>.dev-sec{padding:0;border-bottom:1px solid var(--border)}
+#center>.dev-sec{flex:0 0 auto;border-bottom:1px solid var(--border)}
+#center>#scoreSec{flex:1 1 0;min-height:160px;display:flex;flex-direction:column}
+#center>#scoreSec.closed{flex:0 0 auto;min-height:0}
+#center>#scoreSec>.sec-body{flex:1;display:flex;flex-direction:column;min-height:0}
+#center>#scoreSec #scoreBox{flex:1;overflow:auto}
+aside>#chainWrap,aside>#codePane{border-bottom:1px solid var(--border)}
+.pmove{margin-left:auto;background:none;border:0;color:var(--muted);font-size:14px;line-height:1;padding:0 4px;cursor:pointer;opacity:.35;border-radius:4px}
+.pmove:hover,.pmove:focus-visible{opacity:1;background:var(--panel2,#12151c)}
+.dev-sec>h3{display:flex;align-items:center}
+#chainBar>.pmove,.side-head>.pmove,.pane-head>.pmove{margin-left:6px}
+.panel>h3,.panel>.side-head,.panel>#chainBar,.panel>.pane-head{cursor:grab;user-select:none}
+.panel.dragging{opacity:.4}
+#dropPh{height:4px;margin:2px 8px;border-radius:2px;background:var(--accent,#5b8cff)}
+#panelMenu{position:fixed;z-index:60;min-width:170px;background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.45);padding:4px}
+#panelMenu .pm-title{font-size:10px;letter-spacing:1px;color:var(--muted);padding:6px 10px 4px;font-weight:700;text-transform:uppercase}
+#panelMenu button{display:block;width:100%;text-align:left;background:none;border:0;color:var(--text);font:inherit;font-size:12px;padding:7px 10px;border-radius:5px;cursor:pointer}
+#panelMenu button:hover{background:var(--panel2,#12151c)}
+.view-sel{width:auto;max-width:170px;flex:0 0 auto;margin:0 10px 0 0;font-size:11px}
+.view-sel.dirty{border-color:var(--warn,#e0a030)}
+@media (max-width:1180px){
+  #library{flex-basis:212px}
+  #device{flex-basis:264px}
+}
+.side-head{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 12px;font-size:11px;font-weight:700;letter-spacing:1.2px;color:var(--muted);
+  border-bottom:1px solid var(--border);flex:0 0 auto;
+}
+.btn{
+  padding:6px 12px;border-radius:8px;border:1px solid var(--border);background:var(--card);
+  font-size:12px;font-weight:600;transition:all .13s ease;
+}
+.btn:not(:disabled):hover{border-color:var(--accent);transform:translateY(-1px)}
+.btn.accent{background:var(--accent);color:#22160a;border-color:var(--accent)}
+.btn.accent:not(:disabled):hover{filter:brightness(1.08)}
+.btn.sm{padding:3px 8px;font-size:11px;border-radius:6px}
+.btn.danger:not(:disabled):hover{border-color:var(--red);color:var(--red)}
+
+/* ---- Preset library ---- */
+#presetList{flex:1;overflow-y:auto;padding:6px}
+.pitem{
+  padding:7px 10px;border-radius:8px;cursor:pointer;border:1px solid transparent;
+  transition:all .12s ease;margin-bottom:2px;
+}
+.pitem:hover{background:var(--card)}
+.pitem.active{background:var(--card);border-color:var(--accent)}
+.pitem .pt{font-weight:600;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pitem .pf{font-size:10.5px;color:var(--muted);font-family:var(--mono)}
+.lib-actions{display:flex;flex-wrap:wrap;gap:6px;padding:10px 12px;border-top:1px solid var(--border);flex:0 0 auto}
+#sdSection{border-top:1px solid var(--border);padding:10px 12px;flex:0 0 auto;max-height:34%;overflow-y:auto}
+#sdSection h3{font-size:11px;letter-spacing:1.2px;color:var(--muted);margin-bottom:8px}
+#sdFiles{margin-top:8px}
+.sdrow{display:flex;align-items:center;gap:6px;padding:3px 0;font-family:var(--mono);font-size:11px}
+.sdrow span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hint{color:var(--muted);font-size:11px;line-height:1.5}
+
+/* ============================================================================
+   4. Chain editor (pedalboard)
+   ========================================================================== */
+#chainBar{
+  display:flex;align-items:center;gap:12px;padding:10px 16px;
+  border-bottom:1px solid var(--border);flex:0 0 auto;background:var(--panel);
+}
+#presetTitle{font-size:15px;font-weight:650}
+#presetFile{font-size:11px;color:var(--muted);font-family:var(--mono)}
+#board{
+  flex:1;overflow:auto;padding:24px 20px;display:flex;flex-wrap:wrap;align-content:flex-start;
+  align-items:stretch;gap:0;background:
+    radial-gradient(1200px 500px at 50% -200px,#161a22 0%,var(--bg) 60%);
+}
+.io-node{
+  align-self:center;flex:0 0 auto;width:52px;padding:10px 0;text-align:center;
+  background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+  box-shadow:var(--shadow);
+}
+.io-node .jack{
+  width:16px;height:16px;border-radius:50%;margin:0 auto 6px;
+  background:radial-gradient(circle at 35% 35%,#3a4150,#12151b 70%);
+  border:2px solid #3b4252;
+}
+.io-node .jl{font-size:10px;font-weight:800;letter-spacing:1.5px;color:var(--muted)}
+.cable{
+  align-self:center;flex:0 0 26px;height:3px;position:relative;
+  background:linear-gradient(90deg,#333a48,var(--accent) 50%,#333a48);
+  opacity:.7;border-radius:2px;
+}
+.cable::before,.cable::after{
+  content:"";position:absolute;top:-2.5px;width:8px;height:8px;border-radius:50%;
+  background:#3b4252;border:1px solid #4a5262;
+}
+.cable::before{left:-4px}
+.cable::after{right:-4px}
+
+/* ---- pedal cards ---- */
+.card{
+  flex:0 0 236px;width:236px;background:var(--card);border:1px solid var(--border);
+  border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden;margin:6px 0;
+  transition:transform .14s ease,box-shadow .14s ease,border-color .14s ease,opacity .14s ease;
+}
+.card:hover{transform:translateY(-2px);box-shadow:var(--shadow-lift)}
+.card.sel{border-color:var(--accent)}
+.card.dragging{opacity:.35}
+.card.bypassed .card-body{opacity:.45}
+.stripe{height:5px}
+.stripe[data-cat="dynamics"]{background:var(--cat-dynamics)} .stripe[data-cat="ambience"]{background:var(--cat-ambience)}
+.stripe[data-cat="modulation"]{background:var(--cat-modulation)} .stripe[data-cat="time"]{background:var(--cat-time)}
+.stripe[data-cat="lo-fi"]{background:var(--cat-lo-fi)} .stripe[data-cat="drive"]{background:var(--cat-drive)}
+.stripe[data-cat="texture"]{background:var(--cat-texture)} .stripe[data-cat="filter"]{background:var(--cat-filter)}
+.stripe[data-cat="utility"]{background:var(--cat-utility)} .stripe[data-cat="source"]{background:var(--cat-source)}
+.stripe[data-cat="macro"]{background:var(--cat-macro)} .stripe[data-cat="instrument"]{background:var(--cat-instrument)}
+.card-head{
+  display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:grab;
+  border-bottom:1px solid var(--border);user-select:none;
+}
+.card-head:active{cursor:grabbing}
+.fx-name{
+  flex:1;font-size:12px;font-weight:700;letter-spacing:.3px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;text-shadow:0 1px 0 rgba(0,0,0,.6);
+}
+.led{
+  width:12px;height:12px;border-radius:50%;flex:0 0 auto;border:1px solid #000;
+  background:#3a4150;box-shadow:inset 0 1px 2px rgba(0,0,0,.6);transition:all .15s ease;
+}
+.led.on{background:var(--teal);box-shadow:0 0 7px var(--teal),inset 0 0 3px rgba(255,255,255,.5)}
+.mini{
+  width:20px;height:20px;border-radius:5px;font-size:10px;color:var(--muted);
+  display:inline-flex;align-items:center;justify-content:center;transition:all .12s ease;
+}
+.mini:hover{background:var(--panel);color:var(--text)}
+.mini.rm:hover{color:var(--red)}
+.card-body{padding:8px 10px 10px;transition:opacity .15s ease}
+.prow{margin-bottom:7px}
+.prow:last-child{margin-bottom:0}
+.prow.off .args{opacity:.35;pointer-events:none}
+.inc{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer;margin-bottom:3px}
+.inc input{position:absolute;opacity:0;width:0;height:0}
+.incled{
+  width:8px;height:8px;border-radius:50%;background:#3a4150;flex:0 0 auto;
+  box-shadow:inset 0 1px 1px rgba(0,0,0,.6);transition:all .13s ease;
+}
+.inc input:checked + .incled{background:var(--accent);box-shadow:0 0 5px var(--accent)}
+.inc input:focus-visible + .incled{outline:2px solid var(--accent);outline-offset:2px}
+.inc .plabel{font-weight:600;color:var(--text)}
+.inc .pnote{font-size:10px}
+.arg{display:flex;align-items:center;gap:8px;margin-bottom:3px}
+.argname{flex:0 0 58px;font-size:10px;color:var(--muted);text-align:right;overflow:hidden;text-overflow:ellipsis}
+.ro{
+  flex:0 0 62px;text-align:right;font-family:var(--mono);font-size:11px;
+  font-variant-numeric:tabular-nums;color:var(--accent);
+}
+select{
+  flex:1;background:var(--panel);color:var(--text);border:1px solid var(--border);
+  border-radius:6px;padding:3px 6px;font-size:11px;font-family:var(--mono);
+}
+/* knob-like range inputs */
+input[type=range]{
+  -webkit-appearance:none;appearance:none;flex:1;height:18px;background:transparent;min-width:40px;
+}
+input[type=range]::-webkit-slider-runnable-track{
+  height:4px;border-radius:2px;background:linear-gradient(90deg,#2b313e,#39414f);
+  box-shadow:inset 0 1px 2px rgba(0,0,0,.6);
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:14px;height:14px;border-radius:50%;margin-top:-5px;
+  background:radial-gradient(circle at 32% 30%,#6b7385,#2c323e 70%);
+  border:1px solid #10131a;box-shadow:0 1px 3px rgba(0,0,0,.7),inset 0 1px 1px rgba(255,255,255,.25);
+  transition:transform .12s ease;
+}
+input[type=range]:hover::-webkit-slider-thumb{transform:scale(1.15)}
+input[type=range]::-moz-range-track{height:4px;border-radius:2px;background:#39414f}
+input[type=range]::-moz-range-thumb{
+  width:14px;height:14px;border-radius:50%;border:1px solid #10131a;
+  background:radial-gradient(circle at 32% 30%,#6b7385,#2c323e 70%);
+}
+.mixrow{border-top:1px dashed var(--border);padding-top:6px;margin-top:8px}
+.addmix{font-size:10px;color:var(--muted);padding:2px 6px;border:1px dashed var(--border);border-radius:6px;margin-top:6px}
+.addmix:hover{color:var(--accent);border-color:var(--accent)}
+
+/* add-effect tile + empty state */
+.add-tile{
+  flex:0 0 150px;align-self:center;min-height:88px;margin:6px 0;border-radius:var(--radius);
+  border:1.5px dashed #39414f;color:var(--muted);display:flex;flex-direction:column;gap:6px;
+  align-items:center;justify-content:center;font-size:12px;font-weight:600;transition:all .14s ease;
+  padding:10px;text-align:center;
+}
+.add-tile:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px)}
+.add-tile .plus{font-size:20px;line-height:1}
+#customNotice{
+  margin:auto;max-width:420px;text-align:center;padding:32px;background:var(--card);
+  border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);
+}
+#customNotice h2{font-size:15px;margin-bottom:8px}
+#customNotice p{color:var(--muted);font-size:12px;line-height:1.6;margin-bottom:14px}
+
+/* ============================================================================
+   5. Code pane
+   ========================================================================== */
+#codePane{flex:0 0 auto;border-top:1px solid var(--border);background:var(--panel);display:flex;flex-direction:column;max-height:46%}
+.pane-head{display:flex;align-items:center;gap:10px;padding:6px 12px;flex:0 0 auto}
+.pane-head .caret{transition:transform .15s ease;display:inline-block;font-size:10px}
+#codePane.closed .caret{transform:rotate(-90deg)}
+#codePane.closed .pane-body{display:none}
+.pane-title{font-size:11px;font-weight:700;letter-spacing:1.2px;color:var(--muted);display:flex;gap:6px;align-items:center}
+#codeStats{font-size:10.5px;color:var(--muted);font-family:var(--mono)}
+.pane-body{display:flex;flex-direction:column;min-height:0;flex:1}
+#codePre,#codeTa{
+  flex:1;min-height:120px;overflow:auto;padding:10px 14px;margin:0;
+  font-family:var(--mono);font-size:11.5px;line-height:1.55;color:#c8cede;
+  background:#12151b;border:none;white-space:pre;resize:none;
+}
+#codeTa{color:var(--text);outline:none;border-top:2px solid var(--accent)}
+#codeIssues{flex:0 0 auto;max-height:110px;overflow-y:auto;border-top:1px solid var(--border);padding:6px 14px;font-family:var(--mono);font-size:11px}
+.issue{padding:1px 0}
+.issue.err{color:var(--red)}
+.issue.warn{color:var(--accent)}
+.issue.ok{color:var(--teal)}
+
+/* ============================================================================
+   6. Device panel
+   ========================================================================== */
+.dev-sec{padding:10px 12px;border-bottom:1px solid var(--border)}
+.dev-sec h3{font-size:11px;letter-spacing:1.2px;color:var(--muted);margin-bottom:8px;font-weight:700}
+#serialBanner{background:#2a2118;border:1px solid #4a3a1e;border-radius:8px;padding:10px;font-size:11.5px;line-height:1.5;color:#e8c98f;margin-bottom:8px}
+.badges{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.badge{font-size:10px;font-weight:700;letter-spacing:.5px;padding:2px 8px;border-radius:5px;background:var(--card);border:1px solid var(--border);color:var(--muted);font-family:var(--mono)}
+.badge.on{color:var(--teal);border-color:#1d5b52}
+.meter-row{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.meter-row .ml{flex:0 0 34px;font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.5px}
+.meter-row .mv{flex:0 0 52px;text-align:right;font-family:var(--mono);font-size:10.5px;font-variant-numeric:tabular-nums;color:var(--muted)}
+.vu{
+  flex:1;height:12px;border-radius:4px;position:relative;overflow:hidden;border:1px solid #21252f;
+  background:linear-gradient(90deg,#1db954 0%,#1db954 55%,var(--accent) 75%,var(--red) 95%);
+}
+.cpu .vu{background:linear-gradient(90deg,var(--teal),var(--accent) 80%,var(--red))}
+/* the cover hides the unlit right-hand part of the gradient scale */
+.vu-cover{position:absolute;top:0;right:0;bottom:0;width:100%;background:#12151b}
+.vu-segs{position:absolute;inset:0;background:repeating-linear-gradient(90deg,transparent 0 3px,#12151b 3px 4px)}
+.vu-peak{position:absolute;top:0;bottom:0;width:2px;background:#fff;opacity:.85;left:0%}
+#looperBox{display:flex;align-items:center;gap:14px}
+.lamp{
+  width:26px;height:26px;border-radius:50%;background:#3a4150;border:2px solid #10131a;
+  box-shadow:inset 0 2px 4px rgba(0,0,0,.6);flex:0 0 auto;transition:background .2s ease;
+}
+.lamp.recording{background:var(--red);box-shadow:0 0 14px var(--red);animation:pulse 1s ease-in-out infinite}
+.lamp.playing{background:var(--teal);box-shadow:0 0 12px var(--teal)}
+.lamp.overdubbing{background:var(--accent);box-shadow:0 0 14px var(--accent);animation:pulse 1s ease-in-out infinite}
+.lamp.stopped{background:#8a90a0}
+.lamp.armed{background:var(--red);box-shadow:0 0 8px var(--red);animation:pulse 1.6s ease-in-out infinite}
+.lamp.countin{background:var(--red);box-shadow:0 0 14px var(--red);animation:pulse .5s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.45}}
+#loopRingWrap{position:relative;width:64px;height:64px;flex:0 0 auto}
+#loopRingWrap svg{transform:rotate(-90deg)}
+.ring-bg{fill:none;stroke:#262b36;stroke-width:5}
+.ring-fg{fill:none;stroke:var(--teal);stroke-width:5;stroke-linecap:round;transition:stroke-dashoffset .22s linear,stroke .2s ease}
+#loopMeta{flex:1;min-width:0}
+#loopState{font-size:12px;font-weight:700;letter-spacing:.5px;text-transform:uppercase}
+#loopTime{font-family:var(--mono);font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+#syncBox{margin-top:10px;border-top:1px solid #262b36;padding-top:8px}
+.syncrow{display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap}
+.syncrow label{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--muted);font-weight:700;letter-spacing:.4px}
+.syncrow select,.syncrow input{background:var(--card);color:var(--ink);border:1px solid #262b36;border-radius:6px;padding:3px 5px;font-size:11px;font-family:inherit}
+#syBpm{width:52px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+#syncStat{font-size:11px;color:var(--muted);margin-top:2px}
+#syncStat.warn{color:var(--red);font-weight:700}
+#devPresetName{font-family:var(--mono);font-size:11.5px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.volrow{display:flex;align-items:center;gap:8px}
+.volrow .ro{flex:0 0 40px}
+#devPresets{max-height:180px;overflow-y:auto;margin-top:6px}
+.dprow{display:flex;align-items:center;gap:5px;padding:3px 4px;border-radius:6px;font-family:var(--mono);font-size:11px}
+.dprow.cur{background:var(--card);color:var(--accent)}
+.dprow span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.applyrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.chk{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer}
+.chk input{accent-color:var(--accent)}
+
+/* ============================================================================
+   7. Console drawer
+   ========================================================================== */
+#consoleDrawer{flex:0 0 auto;border-top:1px solid var(--border);background:var(--panel);z-index:15}
+#consoleHead{display:flex;align-items:center;gap:10px;padding:4px 12px}
+#consoleHead .pane-title{cursor:pointer}
+#consoleBody{display:flex;flex-direction:column;height:190px}
+#consoleLog{flex:1;overflow-y:auto;padding:4px 12px;font-family:var(--mono);font-size:11px;line-height:1.5;background:#12151b}
+.cl{white-space:pre-wrap;word-break:break-all}
+.cl .ts{color:#4c5364;margin-right:8px}
+.cl.tx{color:#9ac1ff}
+.cl.rx{color:#8a90a0}
+.cl.mach{color:var(--teal)}
+.cl.err{color:var(--red)}
+.cl.info{color:var(--accent)}
+.console-in{display:flex;gap:8px;padding:6px 12px;border-top:1px solid var(--border)}
+.console-in input{
+  flex:1;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);
+  font-family:var(--mono);font-size:12px;padding:6px 10px;outline:none;
+}
+.console-in input:focus{border-color:var(--accent)}
+
+/* ============================================================================
+   8. Palette modal
+   ========================================================================== */
+.modal{
+  position:fixed;inset:0;background:rgba(6,8,12,.7);backdrop-filter:blur(3px);
+  display:flex;align-items:center;justify-content:center;z-index:100;
+}
+.modal[hidden]{display:none}
+.modal-card{
+  width:min(680px,90vw);max-height:80vh;overflow-y:auto;background:var(--panel);
+  border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow-lift);padding:18px;
+}
+.modal-card h2{font-size:14px;margin-bottom:4px}
+.modal-card .sub{color:var(--muted);font-size:11.5px;margin-bottom:14px}
+.pal-cat{margin-bottom:14px}
+.pal-cat h4{font-size:10.5px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);margin-bottom:6px;display:flex;align-items:center;gap:6px}
+.pal-cat h4 i{width:8px;height:8px;border-radius:2px;display:inline-block}
+.pal-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
+.pal-item{
+  text-align:left;background:var(--card);border:1px solid var(--border);border-radius:8px;
+  padding:8px 10px;transition:all .13s ease;
+}
+.pal-item:hover{border-color:var(--accent);transform:translateY(-1px)}
+.pal-item b{display:block;font-size:12px}
+.pal-item small{color:var(--muted);font-family:var(--mono);font-size:10px}
+.modal-close{float:right;font-size:16px;color:var(--muted)}
+.modal-close:hover{color:var(--text)}
+[hidden]{display:none !important}
+.netrow{display:flex;gap:6px;margin-top:8px}
+.nethost{flex:1;min-width:0;background:#0f1115;border:1px solid #262b36;color:#e6e8ee;border-radius:8px;padding:8px 10px;font:inherit;font-size:12.5px}
+.nethost:focus{outline:2px solid #ffb454;outline-offset:1px}
+
+/* ============================================================================
+   9. Instruments lane — synth voices summed with the guitar before the chain
+   ========================================================================== */
+#instLane{
+  flex:0 0 auto;display:flex;align-items:stretch;gap:0;padding:12px 20px 6px;
+  border-bottom:1px dashed var(--border);background:var(--panel);overflow-x:auto;
+}
+.lane-label{
+  flex:0 0 96px;align-self:center;padding-right:12px;margin-right:6px;border-right:1px solid var(--border);
+}
+.lane-label b{display:block;font-size:10px;font-weight:800;letter-spacing:1.5px;color:var(--muted)}
+.lane-label small{display:block;font-size:10px;color:var(--muted);line-height:1.4;margin-top:4px;opacity:.8}
+.lane-label small.budget{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.lane-label small.over{color:var(--red);opacity:1}
+.card .warn{flex:0 0 auto;color:var(--accent);font-size:12px;cursor:help;line-height:1}
+#instLane .card{margin:6px 8px 6px 0}
+.prow .ptext{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:3px 6px;font:11px var(--mono)}
+.prow .pname{font-size:11px;color:var(--muted);min-width:64px}
+#instLane .add-tile{flex:0 0 132px;min-height:72px;margin:6px 0}
+#instLane .add-tile:disabled{opacity:.35;transform:none;border-color:#39414f;color:var(--muted)}
+.play{border-top:1px dashed var(--border);margin-top:8px;padding-top:8px}
+.play-hint{font-size:10px;color:var(--muted);margin-top:5px;line-height:1.4}
+/* two-octave keyboard (C3–C5) */
+.keys{position:relative;height:58px;display:flex;user-select:none;touch-action:none}
+.key{
+  flex:1;min-width:0;border:1px solid #10131a;border-top:none;border-radius:0 0 3px 3px;cursor:pointer;
+  background:linear-gradient(#e6e8ee,#c9ccd6 85%,#b6bac6);box-shadow:inset 0 -3px 0 rgba(0,0,0,.12);
+  transition:background .05s ease;
+}
+.key.black{
+  position:absolute;top:0;width:7.4%;height:60%;z-index:2;border-radius:0 0 2px 2px;
+  background:linear-gradient(#3a4150,#12151b);box-shadow:0 2px 3px rgba(0,0,0,.6);
+}
+.key.down,.key.black.down{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+.key:focus-visible{outline-offset:-2px}
+/* drum pads */
+.pads{display:flex;gap:6px;user-select:none;touch-action:none}
+.pad{
+  flex:1;height:46px;border-radius:8px;border:1px solid var(--border);color:var(--muted);
+  background:linear-gradient(#262b36,#1a1e26);font-size:10px;font-weight:800;letter-spacing:1px;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 2px 4px rgba(0,0,0,.5);transition:all .06s ease;
+}
+.pad small{display:block;font-family:var(--mono);font-weight:400;letter-spacing:0;font-size:9px;opacity:.7}
+.pad.down{background:var(--accent);color:#22160a;transform:translateY(1px);box-shadow:0 0 10px var(--accent)}
+.pad.down small{opacity:1}
+
+/* ============================================================================
+   10. Footswitches + loops (device panel), collapsible sections
+   ========================================================================== */
+.dev-sec.coll h3{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+.dev-sec.coll h3 .caret{font-size:9px;display:inline-block;transition:transform .15s ease}
+.dev-sec.coll.closed h3 .caret{transform:rotate(-90deg)}
+.dev-sec.coll.closed .sec-body{display:none}
+.sw-head,.sw-row{display:grid;grid-template-columns:40px 1fr 1fr 44px;gap:6px;align-items:center}
+.sw-head{font-size:9.5px;letter-spacing:.8px;color:var(--muted);margin-bottom:4px;font-weight:700}
+.sw-row{margin-bottom:5px}
+.sw-row .swn{font-family:var(--mono);font-size:10px;color:var(--muted);line-height:1.2}
+.sw-row .swn b{display:block;color:var(--text);font-size:12px}
+.sw-row select{width:100%;min-width:0}
+.sw-row input[type=number],.loop-in input[type=text],.ed-field input[type=number]{
+  width:100%;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--border);
+  border-radius:6px;padding:3px 5px;font-size:11px;font-family:var(--mono);outline:none;
+}
+.sw-row input[type=number]:focus,.loop-in input[type=text]:focus,.ed-field input[type=number]:focus{border-color:var(--accent)}
+.sw-row input[type=number][hidden]{display:none}
+#loopsBox{max-height:170px;overflow-y:auto;margin-top:2px}
+.midi-line{font-size:11px;color:var(--muted);display:flex;align-items:center;justify-content:space-between;gap:6px;padding:2px 0}
+.midi-line.mono{font-family:var(--mono);font-size:10px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.midi-loop{font-size:11px;color:var(--muted);display:inline-flex;align-items:center;gap:4px}
+.midi-sel{width:100%;margin-top:4px;font-size:11px}
+#midiFiles{max-height:150px;overflow-y:auto;margin:4px 0}
+.midi-cov{font-size:12px;padding:0 4px;cursor:help}
+.midi-cov.ok{color:var(--ok,#4caf50)}
+.midi-cov.warn{color:var(--warn,#e0a030);cursor:pointer;border-radius:4px}
+.midi-cov.warn.pinned{background:rgba(224,160,48,.18)}
+.midi-cov-note{font-size:11px;line-height:1.35;color:var(--warn,#e0a030);margin:-2px 0 6px 2px}
+/* GLS-DIAG: coverage against the pedal can also be honestly unknown */
+.midi-cov.unknown{color:var(--muted);cursor:pointer;border-radius:4px}
+.midi-cov.unknown.pinned{background:rgba(138,144,160,.18)}
+.midi-cov-note.info{color:var(--muted)}
+/* GLS-DIAG: diagnostics panel findings */
+.diag-item{font-size:11px;line-height:1.45;margin-top:4px;padding-left:13px;position:relative}
+.diag-item::before{content:'\2022';position:absolute;left:2px}
+.diag-item.ok{color:var(--teal)}
+.diag-item.warn{color:var(--warn,#e0a030)}
+.diag-item.note{color:var(--muted)}
+.diag-sync{font-size:11px;margin-top:4px}
+.diag-sync.differs{color:var(--warn,#e0a030)}
+.diag-sync.insync{color:var(--teal)}
+.chan-row{display:flex;align-items:center;gap:8px;margin:4px 0}
+.chan-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.chan-row .midi-sel{width:120px}
+.chan-warn{color:var(--warn,#e0a030);cursor:help}
+#chanFile{margin-top:6px;color:var(--muted)}
+#chanFile.chan-gap{color:var(--warn,#e0a030)}
+#scoreBox{overflow-x:auto;overflow-y:hidden;margin:6px 0;background:var(--panel2,#12151c);border:1px solid var(--border);border-radius:6px}
+#scoreBox svg{display:block}
+#scoreNote{color:var(--muted);font-size:11px}
+.sc-staff,.sc-bar,.sc-ledger,.sc-stem,.sc-beam{stroke:var(--muted,#7c8494)}
+.sc-staff{stroke-width:.7;opacity:.55}
+.sc-bar{stroke-width:.9;opacity:.5}
+.sc-ledger{stroke-width:.8;opacity:.8}
+.sc-stem{stroke-width:1.2}
+.sc-beam{stroke-width:2.8;stroke-linecap:round}
+.sc-note{fill:var(--text,#e6e9ef);stroke:var(--text,#e6e9ef);transition:fill .06s linear,stroke .06s linear}
+.sc-note.open{fill:none;stroke-width:1.6}
+.sc-note.on{fill:var(--accent,#5b8cff);stroke:var(--accent,#5b8cff)}
+.sc-flag{stroke:var(--text,#e6e9ef);stroke-width:1.6}
+rect.sc-rest{fill:var(--muted,#7c8494);stroke:none}
+path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
+.sc-bead{fill:var(--muted,#7c8494)}
+.sc-dot{fill:var(--text,#e6e9ef)}
+.sc-tie{stroke:var(--text,#e6e9ef);stroke-width:1.1;opacity:.8}
+.sc-acc{fill:var(--text,#e6e9ef);font-size:13px}
+.sc-name{fill:var(--text,#e6e9ef);font-size:11px;font-weight:600}
+.sc-sub,.sc-barno{fill:var(--muted,#7c8494);font-size:9px}
+.sc-play{stroke:var(--accent,#5b8cff);stroke-width:1.4;opacity:0}
+.actions-row{display:flex;gap:6px;margin-top:5px;flex-wrap:wrap}
+.actions-row .btn{flex:1}
+.actions-row a.btn{text-align:center;text-decoration:none;line-height:1.9}
+#setupLink{margin-left:8px;text-decoration:none;color:var(--muted);border-color:var(--border)}
+#setupLink:hover{color:var(--text);border-color:var(--accent)}
+.looprow{display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:6px;font-family:var(--mono);font-size:11px}
+.looprow:hover{background:var(--card)}
+.looprow span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.loop-in{display:flex;gap:6px;margin-top:8px}
+.loop-in input[type=text]{flex:1;border-radius:8px;padding:5px 8px}
+.prog{height:6px;border-radius:3px;background:#12151b;border:1px solid #21252f;overflow:hidden;margin-top:8px}
+.prog i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--teal),var(--accent));transition:width .08s linear}
+.prog-lbl{font-size:10px;color:var(--muted);font-family:var(--mono);margin-top:4px;font-variant-numeric:tabular-nums}
+#loopOffer{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:11px;color:var(--teal)}
+
+/* ============================================================================
+   11. Loop editor modal
+   ========================================================================== */
+#loopEdModal .modal-card{width:min(880px,94vw)}
+#waveWrap{position:relative;margin:10px 0 6px;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:#12151b}
+#waveCanvas{display:block;width:100%;height:180px;cursor:crosshair;touch-action:none}
+.ed-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px 18px;margin-top:8px}
+.ed-field{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted)}
+.ed-field label{flex:0 0 58px;text-align:right}
+.ed-field input[type=number]{width:88px;padding:4px 6px}
+.ed-field .unit{flex:0 0 auto;font-family:var(--mono);font-size:10.5px}
+.ed-field.wide{grid-column:1/-1}
+.ed-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center}
+.ed-actions .loop-in{margin:0;flex:1;min-width:180px}
+.btn.toggle.active{border-color:var(--accent);color:var(--accent);background:#2a2118}
+#edInfo{font-family:var(--mono);font-size:10.5px}
+
+/* ============================================================================
+   12. Score playback controls + piano roll + song sessions (NEW)
+   ========================================================================== */
+#scoreBox svg{cursor:pointer}
+.sc-ms{cursor:pointer}
+.sc-ms rect{fill:none;stroke:var(--muted,#7c8494);stroke-width:.8;opacity:.6}
+.sc-ms text{fill:var(--muted,#7c8494);font-size:9px;text-anchor:middle;font-weight:600}
+.sc-ms:hover rect{opacity:1}
+.sc-ms.on rect{fill:var(--accent,#5b8cff);stroke:var(--accent,#5b8cff);opacity:.9}
+.sc-ms.on text{fill:#0d0f13}
+.sc-ab{fill:var(--accent,#5b8cff);opacity:.13;pointer-events:none}
+.sc-ab-lbl{fill:var(--accent,#5b8cff);font-size:9px;font-weight:700;pointer-events:none}
+.sc-lane{fill:var(--card,#171a21);opacity:.45}
+.sc-rollnote{stroke:none}
+#scoreCtlRow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px}
+#scoreCtlRow select,#scoreCtlRow input[type=number]{width:auto}
+#scoreTrans{width:56px}
+#songSec .actions-row{margin-top:6px}
+.song-list{max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px;margin:4px 0 10px}
+.song-list label{display:flex;align-items:center;gap:8px;padding:2px 4px;font-size:11.5px;font-family:var(--mono);cursor:pointer}
+.song-list label .note{color:var(--muted);font-size:10.5px;margin-left:auto}
+.song-cat{font-size:11px;font-weight:600;color:var(--muted);margin:10px 0 2px;text-transform:uppercase;letter-spacing:.06em}
+.song-msg{font-size:11.5px;margin:4px 0;padding:6px 8px;border-radius:6px}
+.song-msg.err{color:var(--red,#ff6b6b);background:rgba(255,107,107,.08)}
+.song-msg.warn{color:var(--accent,#ffb454);background:rgba(255,180,84,.08)}
+.song-msg.ok{color:var(--teal,#2dd4bf)}
+#songModal .modal-card{width:min(560px,94vw);max-height:88vh;overflow:auto}
+</style>
+</head>
+<body>
+
+<!-- ======================= Header ======================= -->
+<header id="topbar">
+  <div class="brand">
+    <!-- loop / waveform logo -->
+    <svg width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+      <path d="M16 4 A12 12 0 1 0 28 16" stroke="#ffb454" stroke-width="2.6" stroke-linecap="round"/>
+      <path d="M28 16 l-3.4 -3 M28 16 l-4.4 1.4" stroke="#ffb454" stroke-width="2.4" stroke-linecap="round"/>
+      <path d="M9 16 l2 0 2 -5 3 10 2.5 -7 1.5 2 2 0" stroke="#2dd4bf" stroke-width="1.9"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <h1>LoopSmith <span>Studio</span></h1>
+    <span id="connPill" class="pill off">Disconnected</span>
+  </div>
+  <div class="spacer"></div>
+  <select id="viewSel" class="midi-sel view-sel" title="Choose how the panels are arranged" aria-label="View"></select>
+  <div class="transport" role="group" aria-label="Looper transport">
+    <button id="tLoop"  class="tbtn rec" title="Loop — tap (record / play / overdub)" disabled>&#9679;</button>
+    <button id="tStop"  class="tbtn" title="Stop" disabled>&#9632;</button>
+    <button id="tUndo"  class="tbtn" title="Undo / redo last overdub" disabled>&#8617;</button>
+    <button id="tClear" class="tbtn" title="Clear loop" disabled>&#10005;</button>
+    <button id="tBypass" class="tbtn wide" title="FX bypass" disabled>BYP</button>
+  </div>
+</header>
+
+<!-- ======================= Main ======================= -->
+<main id="app">
+
+  <!-- Preset workspace -->
+  <aside id="library" aria-label="Preset workspace">
+    <div class="dev-sec" id="libSec" data-title="Presets">
+    <div class="side-head">PRESETS <button id="newBtn" class="btn sm accent">+ New</button></div>
+    <div id="presetList"></div>
+    <div class="lib-actions">
+      <button id="dupBtn" class="btn sm">Duplicate</button>
+      <button id="renameBtn" class="btn sm">Rename</button>
+      <button id="exportBtn" class="btn sm">Export .txt</button>
+      <button id="importBtn" class="btn sm">Import…</button>
+      <button id="deleteBtn" class="btn sm danger">Delete</button>
+    </div>
+    <div id="sdSection">
+      <h3>SD CARD</h3>
+      <button id="sdOpenBtn" class="btn sm">Open SD card folder</button>
+      <div id="sdBox" hidden>
+        <div class="hint" id="sdPath"></div>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button id="sdSaveBtn" class="btn sm accent">Save current to SD</button>
+          <button id="sdRefreshBtn" class="btn sm">Refresh</button>
+        </div>
+        <div id="sdFiles"></div>
+      </div>
+      <div id="sdUnsupported" class="hint" hidden>Folder access is not supported by this browser.</div>
+    </div>
+    </div>
+  </aside>
+
+  <!-- Chain editor -->
+  <section id="center">
+    <div id="chainWrap" class="grow" data-title="Chain" style="flex:1;display:flex;flex-direction:column;min-height:0">
+      <div id="chainBar">
+        <div style="min-width:0">
+          <div id="presetTitle"></div>
+          <div id="presetFile"></div>
+        </div>
+        <div class="spacer"></div>
+        <button id="addFxBtn" class="btn accent">+ Add effect</button>
+      </div>
+      <div id="instLane" aria-label="Instruments"></div>
+      <div id="board" aria-label="Effect chain"></div>
+    </div>
+
+    <!-- Code view -->
+    <div id="codePane" data-title="PatchScript">
+      <div class="pane-head">
+        <button class="pane-title" id="codeToggle" aria-expanded="true"><span class="caret">&#9660;</span> PATCHSCRIPT</button>
+        <span id="codeStats"></span>
+        <div class="spacer"></div>
+        <button id="codeEditBtn" class="btn sm">Edit as text</button>
+        <button id="codeCopyBtn" class="btn sm">Copy</button>
+      </div>
+      <div class="pane-body">
+        <pre id="codePre" tabindex="0"></pre>
+        <textarea id="codeTa" hidden spellcheck="false" aria-label="PatchScript source"></textarea>
+        <div id="codeIssues"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Device panel -->
+  <aside id="device" aria-label="Device">
+    <div class="dev-sec" id="devSec">
+      <h3>DEVICE</h3>
+      <div id="serialBanner" hidden>
+        USB (Web Serial) needs <b>Chrome or Edge on desktop</b>. You can still connect
+        over the network through the Pi bridge.
+      </div>
+      <div style="display:flex;gap:8px">
+        <button id="connectBtn" class="btn accent" style="flex:1">Connect USB</button>
+        <button id="netBtn" class="btn" style="flex:1">Network&#8230;</button>
+      </div>
+      <div id="netRow" class="netrow" style="display:none">
+        <input id="netHost" class="nethost" type="text" placeholder="loopsmith.local" spellcheck="false" aria-label="Bridge host">
+        <button id="netGo" class="btn accent">Connect</button>
+      </div>
+      <div class="badges" id="devBadges" hidden>
+        <span class="badge" id="bFw">FW —</span>
+        <span class="badge" id="bPsram">PSRAM —</span>
+        <span class="badge" id="bSd">SD</span>
+        <span class="badge" id="bFlash">FLASH</span>
+      </div>
+    </div>
+
+    <div class="dev-sec" id="meterSec">
+      <h3>METERS</h3>
+      <div class="meter-row cpu"><span class="ml">CPU</span>
+        <div class="vu" id="cpuVu"><div class="vu-cover"></div><div class="vu-segs"></div></div>
+        <span class="mv" id="cpuText">—</span></div>
+      <div class="meter-row"><span class="ml">MEM</span>
+        <div class="vu" id="memVu"><div class="vu-cover"></div><div class="vu-segs"></div></div>
+        <span class="mv" id="memText">—</span></div>
+      <div class="meter-row"><span class="ml">IN</span>
+        <div class="vu" id="vuIn"><div class="vu-cover"></div><div class="vu-segs"></div><div class="vu-peak"></div></div>
+        <span class="mv" id="vuInText">—</span></div>
+      <div class="meter-row"><span class="ml">OUT</span>
+        <div class="vu" id="vuOut"><div class="vu-cover"></div><div class="vu-segs"></div><div class="vu-peak"></div></div>
+        <span class="mv" id="vuOutText">—</span></div>
+    </div>
+
+    <div class="dev-sec" id="looperSec">
+      <h3>LOOPER</h3>
+      <div id="looperBox">
+        <div class="lamp" id="loopLamp"></div>
+        <div id="loopRingWrap">
+          <svg width="64" height="64" viewBox="0 0 64 64">
+            <circle class="ring-bg" cx="32" cy="32" r="26"></circle>
+            <circle class="ring-fg" id="loopRing" cx="32" cy="32" r="26"
+                    stroke-dasharray="163.36" stroke-dashoffset="163.36"></circle>
+          </svg>
+        </div>
+        <div id="loopMeta">
+          <div id="loopState">—</div>
+          <div id="loopTime">0.0 / 0.0 s</div>
+        </div>
+      </div>
+      <div id="syncBox">
+        <div class="syncrow">
+          <label>SYNC <select id="syMode" disabled aria-label="Quantise mode">
+            <option value="off">Off</option><option value="beat">Beat</option><option value="bar">Bar</option>
+          </select></label>
+          <label>CLOCK <select id="sySrc" disabled aria-label="Tempo source">
+            <option value="internal">Internal</option><option value="midi">MIDI in</option>
+          </select></label>
+          <label>BPM <input id="syBpm" type="number" min="30" max="300" step="1" value="120" disabled aria-label="Tempo"></label>
+        </div>
+        <div class="syncrow">
+          <label>COUNT-IN <select id="syCi" disabled aria-label="Count-in bars">
+            <option value="0">Off</option><option value="1">1 bar</option><option value="2">2 bars</option><option value="4">4 bars</option>
+          </select></label>
+          <label>LENGTH <select id="syBars" disabled aria-label="Recording length in bars">
+            <option value="0">Free</option><option value="1">1 bar</option><option value="2">2 bars</option>
+            <option value="4">4 bars</option><option value="8">8 bars</option><option value="16">16 bars</option><option value="32">32 bars</option>
+          </select></label>
+          <label>CLICK <select id="syMet" disabled aria-label="Metronome">
+            <option value="off">Off</option><option value="rec">Record</option><option value="on">On</option>
+          </select></label>
+        </div>
+        <div id="syncStat">Connect to configure musical sync.</div>
+      </div>
+    </div>
+
+    <div class="dev-sec" id="outputSec">
+      <h3>OUTPUT</h3>
+      <div style="margin-bottom:6px">On pedal: <span id="devPresetName">—</span></div>
+      <div class="volrow">
+        <span class="ml" style="font-size:10px;color:var(--muted);font-weight:700">VOL</span>
+        <input type="range" id="volSlider" min="0" max="100" step="1" value="70" disabled aria-label="Output volume">
+        <span class="ro" id="volText">70%</span>
+      </div>
+    </div>
+
+    <div class="dev-sec" id="liveSec">
+      <h3>LIVE EDIT</h3>
+      <div class="applyrow">
+        <button id="applyBtn" class="btn accent" disabled>Apply live</button>
+        <label class="chk"><input type="checkbox" id="autoApplyChk" disabled> Auto-apply (300 ms)</label>
+      </div>
+      <div class="hint" style="margin-top:6px">Pushes the editor state to the pedal without saving to SD.</div>
+    </div>
+
+    <div class="dev-sec">
+      <h3>DEVICE PRESETS</h3>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button id="dpPrev" class="btn sm" disabled>&#9664; Prev</button>
+        <button id="dpNext" class="btn sm" disabled>Next &#9654;</button>
+        <button id="dpRefresh" class="btn sm" disabled>Refresh</button>
+        <button id="dpPush" class="btn sm accent" disabled>Push current</button>
+      </div>
+      <div id="devPresets"></div>
+    </div>
+
+    <div class="dev-sec coll" id="swSec">
+      <h3 role="button" tabindex="0" aria-expanded="true" aria-controls="swBody"><span class="caret">&#9660;</span> FOOTSWITCHES</h3>
+      <div class="sec-body" id="swBody">
+        <div id="swBox"></div>
+      </div>
+    </div>
+
+    <div class="dev-sec coll" id="loopSec">
+      <h3 role="button" tabindex="0" aria-expanded="true" aria-controls="loopBody"><span class="caret">&#9660;</span> LOOPS</h3>
+      <div class="sec-body" id="loopBody">
+        <div id="loopsBox"></div>
+        <div class="loop-in">
+          <input type="text" id="loopSaveName" placeholder="Save current loop as… (riff.wav)" spellcheck="false" aria-label="Loop file name" disabled>
+          <button id="loopSaveBtn" class="btn sm accent" disabled>Save</button>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+          <button id="loopUploadBtn" class="btn sm" disabled>Upload WAV&#8230;</button>
+          <button id="loopsRefresh" class="btn sm" disabled>Refresh</button>
+        </div>
+        <div id="loopProg" hidden><div class="prog"><i></i></div><div class="prog-lbl"></div></div>
+        <div id="loopOffer" hidden></div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<!-- ======================= Console drawer ======================= -->
+<footer id="consoleDrawer">
+  <div id="consoleHead">
+    <button class="pane-title" id="consoleToggle" aria-expanded="false"><span class="caret">&#9654;</span> CONSOLE</button>
+    <span id="consoleCount" style="font-size:10px;color:var(--muted);font-family:var(--mono)"></span>
+  </div>
+  <div id="consoleBody" hidden>
+    <div id="consoleLog" aria-live="polite"></div>
+    <div class="console-in">
+      <input id="consoleInput" placeholder="Type a raw command (e.g. status, list, looper tap)" aria-label="Serial command">
+      <button id="consoleSend" class="btn sm">Send</button>
+    </div>
+  </div>
+</footer>
+
+<!-- ======================= Palette modal ======================= -->
+<div id="paletteModal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="Add effect">
+    <button class="modal-close" id="paletteClose" aria-label="Close">&#10005;</button>
+    <h2>Add effect</h2>
+    <div class="sub">Pick a pedal for your board. Macros expand to multi-object patterns in PatchScript.</div>
+    <div id="paletteGroups"></div>
+  </div>
+</div>
+
+<!-- ======================= Instrument picker modal ======================= -->
+<div id="instModal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="Add instrument">
+    <button class="modal-close" id="instClose" aria-label="Close">&#10005;</button>
+    <h2>Add instrument</h2>
+    <div class="sub">Synth voices that run on the pedal, summed with the guitar before the first effect. Play them from the card, a USB MIDI controller, or a footswitch.</div>
+    <div id="instGroups"></div>
+  </div>
+</div>
+
+<!-- ======================= Loop editor modal ======================= -->
+<div id="loopEdModal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="Loop editor">
+    <button class="modal-close" id="edClose" aria-label="Close">&#10005;</button>
+    <h2>Loop editor &middot; <span id="edName"></span></h2>
+    <div class="sub" id="edInfo"></div>
+    <div id="waveWrap"><canvas id="waveCanvas" height="180" aria-label="Waveform — drag the handles to trim"></canvas></div>
+    <div class="ed-grid">
+      <div class="ed-field"><label for="edStart">Start</label><input type="number" id="edStart" min="0" step="0.01" value="0"><span class="unit">s</span></div>
+      <div class="ed-field"><label for="edEnd">End</label><input type="number" id="edEnd" min="0" step="0.01" value="0"><span class="unit">s</span></div>
+      <div class="ed-field"><label for="edFadeIn">Fade in</label><input type="number" id="edFadeIn" min="0" step="1" value="0"><span class="unit">ms</span></div>
+      <div class="ed-field"><label for="edFadeOut">Fade out</label><input type="number" id="edFadeOut" min="0" step="1" value="0"><span class="unit">ms</span></div>
+      <div class="ed-field wide"><label for="edGain">Gain</label><input type="range" id="edGain" min="-12" max="12" step="0.1" value="0" aria-label="Gain (dB)"><span class="ro" id="edGainRo">0 dB</span></div>
+    </div>
+    <div class="ed-actions">
+      <button id="edNormalize" class="btn sm toggle" title="Scale the trimmed region so its peak hits 0 dBFS (before the gain)">Normalize</button>
+      <button id="edReverse" class="btn sm toggle">Reverse</button>
+      <button id="edPreview" class="btn sm">&#9654; Preview</button>
+      <div class="spacer"></div>
+      <div class="loop-in"><input type="text" id="edSaveName" spellcheck="false" aria-label="File name on the pedal"></div>
+      <button id="edDownload" class="btn sm">Download</button>
+      <button id="edSend" class="btn sm accent" disabled>Send to pedal</button>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="importInput" accept=".txt,text/plain" multiple hidden>
+<input type="file" id="loopUploadInput" accept=".wav,audio/wav,audio/x-wav,audio/wave" hidden>
+
+<script>
+/* @studio-sources */
+</script>
+<script>
+if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol) && location.hostname !== '' )
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
+</body>
+</html>
