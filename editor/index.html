@@ -6473,10 +6473,10 @@ function sysPaint() {
   // The kiosk has no address bar: when the Pi comes back from an update running a
   // different version, this page is stale and reloads itself. Only ever forward,
   // and only when a version was known first, so a flaky link cannot loop it.
-  if (st.version) { if (sys.seenVersion && st.version !== sys.seenVersion) { consoleLog('ok', `Studio ${st.version} installed — reloading`); setTimeout(() => location.reload(), 800); return; } sys.seenVersion = st.version; }
+  if (!st.busy && st.version) { if (sys.seenVersion && st.version !== sys.seenVersion) { consoleLog('ok', `Studio ${st.version} installed — reloading`); setTimeout(() => location.reload(), 800); return; } sys.seenVersion = st.version; }
   const busy = st.busy;
   let txt = '';
-  if (busy) txt = 'installing… Studio will reconnect';
+  if (busy) txt = st.transaction ? st.transaction.message : 'installing… Studio will reconnect';
   else if (st.message) txt = st.message;
   else if (up && up.available) txt = `v${up.latest} available (${up.source})`;
   else if (up) txt = up.detail || 'up to date';

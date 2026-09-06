@@ -33,7 +33,7 @@ cp -r "$HERE"/splash "$KIT/"
 cp -r "$REPO"/midi "$KIT/midi"
 cp "$HERE"/firstrun.sh "$HERE"/looper-net.py "$HERE"/provision.sh "$HERE"/kiosk.sh "$HERE"/usb-mount.sh "$HERE"/midi-connect.sh \
    "$HERE"/80-looper-usb.rules "$HERE"/81-looper-midi.rules "$HERE"/50-looper.rules "$HERE"/NetworkManager-looper.conf "$HERE"/dnsmasq-shared-looper.conf \
-   "$HERE"/looper-net.service "$HERE"/looper-provision.service "$HERE"/looper-kiosk.service "$HERE"/looper-audio.service "$HERE"/looper-backing.service "$HERE"/looper-update.sh "$HERE"/looper-update.service "$HERE"/looper-update.timer \
+   "$HERE"/looper-net.service "$HERE"/looper-provision.service "$HERE"/looper-kiosk.service "$HERE"/looper-audio.service "$HERE"/looper-backing.service "$HERE"/update_transaction.py "$HERE"/looper-update.sh "$HERE"/looper-rollback.service "$HERE"/looper-update.service "$HERE"/looper-update.timer \
    "$HERE"/looper-maintenance.service "$HERE"/looper-admin.sh "$HERE"/looper-admin.service "$KIT/"
 sed -e "s/__USER__/looper/" -e "s|--editor /opt/looper/editor|--editor /opt/looper/editor --www /opt/looper/pi/www --storage /media/usb|" \
     "$REPO"/pi/looper-bridge.service > "$KIT/looper-bridge.service"

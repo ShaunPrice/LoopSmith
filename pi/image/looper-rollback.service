@@ -1,0 +1,8 @@
+[Unit]
+Description=Restore previous companion app and service files
+After=looper-bridge.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/looper/pi/looper-update.sh rollback
+TimeoutStartSec=1800

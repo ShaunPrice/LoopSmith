@@ -59,6 +59,7 @@ rm -rf /opt/looper; mkdir -p /opt/looper
 cp -r "$KIT/app/." /opt/looper/
 cp "$KIT"/looper-net.py "$KIT"/provision.sh "$KIT"/kiosk.sh "$KIT"/usb-mount.sh /opt/looper/pi/
 [ -f "$KIT/midi-connect.sh" ] && cp "$KIT/midi-connect.sh" /opt/looper/pi/
+[ -f "$KIT/update_transaction.py" ] && cp "$KIT/update_transaction.py" /opt/looper/pi/
 [ -f "$KIT/looper-update.sh" ] && cp "$KIT/looper-update.sh" /opt/looper/pi/
 [ -f "$KIT/looper-admin.sh" ] && cp "$KIT/looper-admin.sh" /opt/looper/pi/
 cp "$KIT/VERSION" /opt/looper/VERSION 2>/dev/null || echo "0.0.0" > /opt/looper/VERSION

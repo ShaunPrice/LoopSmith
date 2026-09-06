@@ -592,7 +592,7 @@ class WebAuth:
             return None
 
     def enabled(self):
-        return conf_value("WEB_AUTH", "1") != "0" and self.creds() is not None
+        return conf_value("WEB_AUTH", "1") != "0"
 
     def check(self, user, password):
         c = self.creds()
@@ -1089,9 +1089,9 @@ class PiSystem:
             self.update_last = {"available": False, "version": self.app_version(), "detail": out[-200:] or "check failed"}
         return self.update_last
 
-    async def update_apply(self):
+    async def update_apply(self, rollback=False):
         """Install an update in the background. The bridge restarts itself as part of it, so the
-        browser sees the socket drop and reconnect - which is the signal that it worked."""
+        browser reconnects and checks transaction status; reconnect alone is not success."""
         if not os.path.exists(self.UPDATER):
             return False, "no updater installed"
         if await self.update_busy():
@@ -1102,7 +1102,7 @@ class PiSystem:
             os.remove("/run/looper/update-result")
         except OSError:
             pass
-        rc, out = await self._run("systemctl", "start", "--no-block", "looper-update.service", timeout=20)
+        rc, out = await self._run("systemctl", "start", "--no-block", "looper-rollback.service" if rollback else "looper-update.service", timeout=20)
         if rc != 0:
             return False, (out or "systemctl refused").strip().split("\n")[-1][:200]
         self.update_msg = ""
@@ -1111,6 +1111,9 @@ class PiSystem:
 
     async def update_busy(self):
         rc, out = await self._run("systemctl", "is-active", "looper-update.service", timeout=8)
+        if out.strip() in ("activating", "active"):
+            return True
+        rc, out = await self._run("systemctl", "is-active", "looper-rollback.service", timeout=8)
         return out.strip() in ("activating", "active")
 
     # ---- privileged setup actions (looper-admin.service, started through polkit) ----
@@ -1170,7 +1173,13 @@ class PiSystem:
             pass
         st = {"version": self.app_version(), "updater": os.path.exists(self.UPDATER),
               "busy": busy, "message": self.update_msg,
+              "rollback_available": os.path.isfile("/var/lib/looper/update-backup/manifest.json"),
               "os_reboot_required": os.path.exists("/var/run/reboot-required")}
+        try:
+            with open("/var/lib/looper/update-progress.json") as progress:
+                st["transaction"] = json.load(progress)
+        except (OSError, ValueError):
+            pass
         if self.update_last:
             st.update({k: self.update_last.get(k) for k in ("available", "latest", "source", "detail", "checked")})
         return st
@@ -1477,6 +1486,9 @@ class Server:
     CLAIM_PATHS = ("/claim", "/api/claim", "/api/claim/state")
 
     async def route(self, r, w, method, path, headers, body, peer):
+        if path == "/api/health" and WebAuth.is_local(peer):
+            await self._json(w, {"ok": True})
+            return
         # Until someone has set a login, the pedal serves nothing but the claim page.
         if not self.auth.claimed():
             if path == "/claim":
@@ -1518,6 +1530,7 @@ class Server:
                 return
             await self._respond(w, "302 Found", "", "text/plain", ["Location: /claim"])
             return
+
 
         # Browsers that are not the pedal's own screen must be signed in.
         if self.auth.enabled() and not WebAuth.is_local(peer) and path not in self.OPEN_PATHS:
@@ -1751,8 +1764,8 @@ class Server:
             await self._json(w, await self.system.admin("stage-bundle", {}, 30.0))
             return
 
-        if path == "/api/update/apply" and method == "POST":
-            ok, msg = await self.system.update_apply()
+        if path in ("/api/update/apply", "/api/update/rollback") and method == "POST":
+            ok, msg = await self.system.update_apply(rollback=path.endswith("/rollback"))
             await self._json(w, {"ok": ok, "message": msg})
             return
 

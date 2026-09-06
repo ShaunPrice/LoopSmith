@@ -2,8 +2,8 @@
 # LoopSmith companion — in-place update of the app on the Pi.
 #
 #   looper-update.sh check    print JSON: current version, what is available, from where
-#   looper-update.sh apply    install it (atomically, with rollback) and restart the services
-#   looper-update.sh os       apt security updates only (no reboot)
+#   looper-update.sh apply    install it with app/service rollback and restart the services
+#   looper-update.sh os       apt package updates (no reboot)
 #
 # Update bundles are plain tarballs made by pi/image/build_release.sh. They are looked for in
 # this order, so the offline route always wins and never needs credentials:
@@ -19,6 +19,7 @@ APP=/opt/looper
 STATE=/var/lib/looper
 LOG=$STATE/update.log
 RUN=/run/looper
+HELPER="$(dirname "$0")/update_transaction.py"
 CONF_FILES=("$BOOT/looper.conf" /etc/looper/looper.conf)
 mkdir -p "$STATE" "$RUN" 2>/dev/null
 
@@ -64,7 +65,7 @@ download() {      # download <dest>; echoes the source it used, empty when there
 # A GitHub tarball is the whole repository, not a bundle: build one from it in place.
 repack_repo() {   # repack_repo <repo tarball> <out bundle>
   local src=$1 out=$2 tmp; tmp=$(mktemp -d)
-  tar -xzf "$src" -C "$tmp" || { rm -rf "$tmp"; return 1; }
+  python3 "$HELPER" unpack "$src" "$tmp" || { rm -rf "$tmp"; return 1; }
   local root; root=$(find "$tmp" -mindepth 1 -maxdepth 1 -type d | head -1)
   [ -n "$root" ] && [ -f "$root/VERSION" ] || { rm -rf "$tmp"; return 1; }
   local stage=$tmp/looper-update
@@ -75,7 +76,7 @@ repack_repo() {   # repack_repo <repo tarball> <out bundle>
   cp -r "$root"/pi/image/splash "$stage/app/" 2>/dev/null
   cp -r "$root"/midi "$stage/app/midi" 2>/dev/null
   cp "$root"/editor/index.html "$stage/app/editor/" 2>/dev/null
-  for f in looper-net.py provision.sh kiosk.sh usb-mount.sh midi-connect.sh looper-update.sh looper-admin.sh; do
+  for f in looper-net.py provision.sh kiosk.sh usb-mount.sh midi-connect.sh looper-update.sh looper-admin.sh update_transaction.py; do
     [ -f "$root/pi/image/$f" ] && cp "$root/pi/image/$f" "$stage/app/pi/"
   done
   for f in "$root"/pi/image/*.service "$root"/pi/image/*.timer; do [ -f "$f" ] && cp "$f" "$stage/units/"; done
@@ -93,22 +94,26 @@ do_check() {
     v=$(bundle_version "$b")
     if [ -n "$v" ] && newer "$v" "$(cur)"; then json true "$v" "bundle" "$(basename "$b")"; return; fi
   fi
-  local tmp=/tmp/looper-update-check.tar.gz src
-  src=$(download "$tmp" 2>/dev/null) || { json false "$(cur)" "${b:+bundle}" "no update source configured or reachable"; rm -f "$tmp"; return; }
-  local out=/tmp/looper-update-remote.tar.gz
+  local tmp src; tmp=$(mktemp /tmp/looper-check.XXXXXX.tar.gz)
+  if [ -z "$(conf UPDATE_URL)$(conf UPDATE_REPO)" ]; then
+    json false "$(cur)" "${b:+bundle}" "no update source configured; upload a bundle or configure UPDATE_URL / UPDATE_REPO"; return
+  fi
+  src=$(download "$tmp" 2>/dev/null) || { json false "$(cur)" "remote" "configured update source could not be reached; check network and access"; rm -f "$tmp"; return; }
+  local out; out=$(mktemp /tmp/looper-remote.XXXXXX.tar.gz)
   if [ "$src" = "github" ]; then repack_repo "$tmp" "$out" || { json false "$(cur)" "$src" "downloaded tarball was not usable"; rm -f "$tmp"; return; }
   else cp "$tmp" "$out"; fi
   v=$(bundle_version "$out"); rm -f "$tmp"
   if [ -n "$v" ] && newer "$v" "$(cur)"; then json true "$v" "$src" "ready to install"; else json false "${v:-$(cur)}" "$src" "already up to date"; fi
+  rm -f "$out"
 }
 
 do_apply() {
-  local b tmp=/tmp/looper-update.tar.gz src v
+  local b tmp src v; tmp=$(mktemp /tmp/looper-update.XXXXXX.tar.gz)
   b=$(find_bundle)
   if [ -n "${b:-}" ] && [ -n "$(bundle_version "$b")" ] && newer "$(bundle_version "$b")" "$(cur)"; then
     cp "$b" "$tmp"; src="bundle $(basename "$b")"
   else
-    local dl=/tmp/looper-update-dl.tar.gz s
+    local dl s; dl=$(mktemp /tmp/looper-download.XXXXXX.tar.gz)
     s=$(download "$dl") || { echo "no update available"; result "no update available"; log "apply: nothing to install"; return 1; }
     if [ "$s" = "github" ]; then repack_repo "$dl" "$tmp" || { echo "bad tarball"; return 1; }; else cp "$dl" "$tmp"; fi
     rm -f "$dl"; src="$s"
@@ -118,38 +123,20 @@ do_apply() {
   newer "$v" "$(cur)" || { echo "already at $(cur)"; result "already at $(cur)"; return 0; }
 
   local work; work=$(mktemp -d)
-  tar -xzf "$tmp" -C "$work" || { echo "cannot unpack"; rm -rf "$work"; return 1; }
+  python3 "$HELPER" unpack "$tmp" "$work" || { result "unsafe or invalid bundle"; rm -rf "$work" "$tmp"; return 1; }
   local stage=$work/looper-update
-  [ -f "$stage/app/pi/looper_bridge.py" ] && [ -f "$stage/app/editor/index.html" ] || { echo "bundle is missing the app"; rm -rf "$work"; return 1; }
-  python3 -m py_compile "$stage/app/pi/looper_bridge.py" || { echo "bundle's bridge does not compile"; rm -rf "$work"; return 1; }
-
-  log "updating $(cur) -> $v from $src"
-  rm -rf "$APP.prev"; cp -a "$APP" "$APP.prev"                      # rollback copy
-  cp -a "$stage/app/." "$APP/"
-  cp "$stage/VERSION" "$APP/VERSION"
-  chmod +x "$APP"/pi/*.py "$APP"/pi/*.sh 2>/dev/null
-  chown -R looper:looper "$APP" 2>/dev/null
-  [ -d "$stage/units" ] && cp "$stage"/units/*.service "$stage"/units/*.timer /etc/systemd/system/ 2>/dev/null
-  [ -d "$stage/udev" ]  && cp "$stage"/udev/*.rules /etc/udev/rules.d/ 2>/dev/null && udevadm control --reload 2>/dev/null
-  [ -x "$stage/postinstall.sh" ] && "$stage/postinstall.sh" >> "$LOG" 2>&1
-  systemctl daemon-reload
-  systemctl restart looper-bridge
-
-  local ok=0
-  for i in $(seq 1 20); do curl -sf -m 2 -o /dev/null http://127.0.0.1/api/status && { ok=1; break; }; sleep 1; done
-  if [ "$ok" != 1 ]; then
-    log "the new version did not answer - rolling back to $(cat "$APP.prev/VERSION" 2>/dev/null)"
-    rm -rf "$APP"; mv "$APP.prev" "$APP"; systemctl restart looper-bridge
-    result "update failed - rolled back"; echo "update failed - rolled back"; rm -rf "$work" "$tmp"; return 1
+  if ! python3 "$HELPER" apply "$stage" >> "$LOG" 2>&1; then
+    result "update failed; see update progress and log for rollback status"
+    rm -rf "$work" "$tmp"; return 1
   fi
-  systemctl restart looper-audio looper-backing looper-kiosk 2>/dev/null
-  # The boot splash lives in the initramfs, so a changed theme has to be reinstalled and
-  # the initramfs rebuilt. That takes a minute on a Pi 3 and is not needed for the update
-  # to work, so it runs on afterwards in the background and only when something changed.
+  # Only trusted installed code runs as the post-update step. Bundle-supplied
+  # arbitrary hooks are not executed. OS packages/boot firmware are separate.
+  systemctl restart looper-audio looper-backing looper-kiosk 2>/dev/null || true
   local theme=/usr/share/plymouth/themes/looper
   if [ -d "$theme" ] && [ -d "$APP/splash" ] && ! diff -rq "$APP/splash" "$theme" >/dev/null 2>&1; then
-    log "boot splash changed - reinstalling the theme and rebuilding the initramfs"
-    nohup sh -c "install -m 644 '$APP'/splash/* '$theme'/ && plymouth-set-default-theme -R looper" >> "$LOG" 2>&1 &
+    if ! { install -m 644 "$APP"/splash/* "$theme"/ && plymouth-set-default-theme -R looper; } >> "$LOG" 2>&1; then
+      log "app updated; boot splash rebuild failed (retry separately)"
+    fi
   fi
   [ -n "${b:-}" ] && [ -f "$b" ] && mv "$b" "$b.installed" 2>/dev/null    # don't install the same bundle twice
   log "updated to $v"
@@ -161,6 +148,7 @@ do_apply() {
 case "${1:-check}" in
   check) do_check ;;
   apply) do_apply ;;
+  rollback) python3 "$HELPER" rollback ;;
   os)    DEBIAN_FRONTEND=noninteractive apt-get update -qq >> "$LOG" 2>&1 &&
          DEBIAN_FRONTEND=noninteractive apt-get -y -qq -o Dpkg::Options::=--force-confold upgrade >> "$LOG" 2>&1 &&
          log "os packages upgraded" && echo "os packages upgraded" ;;
