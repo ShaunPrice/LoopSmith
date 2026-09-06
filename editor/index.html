@@ -6061,6 +6061,8 @@ function createDiagnostics(deps) {
       out.push({ level: 'note', text: 'Waiting for the first status report from the pedal…' });
       return out;
     }
+    if (st.output_muted === true)
+      out.push({ level: 'warn', text: 'Panic has muted all outputs. Use Resume audio in the top transport to hear the pedal again.' });
     const vol = typeof st.volume === 'number' ? st.volume : null;
     if (vol !== null && vol <= 0.02)
       out.push({ level: 'warn', text: 'Pedal volume is ' + Math.round(vol * 100) + '% — turn it up (VOL in the OUTPUT section).' });
