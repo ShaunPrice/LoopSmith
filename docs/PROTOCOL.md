@@ -16,12 +16,12 @@ It is designed to be pleasant for humans *and* trivially parseable by the Studio
 | `status` | `#STATUS {…}` | see payload below |
 | `monitor on` / `monitor off` | `#OK monitor` then periodic `#STATUS {…}` at 4 Hz | live meters / loop position for UIs |
 | `list` | `#PRESETS {"current":1,"presets":["01_clean.txt","02_ambient.txt"]}` | filename order |
-| `load <index|name>` | `#OK load 02_ambient.txt rev=4` or `#ERR …` | loads + applies preset (`rev=` since firmware 2.2.2 — see Diagnostics) |
+| `load <index|name>` | `#OK load 02_ambient.txt rev=4 fp=9f2c1a3b-1234` or `#ERR …` | loads + applies preset (`rev=`/`fp=` since firmware 2.2.2 — see Diagnostics) |
 | `get <name>` | `#FILE <name> <len>\n` + exactly `<len>` raw bytes + `\n#END\n` | read a preset file |
 | `put <name> <len>` | `#SEND` → send exactly `<len>` bytes → `#OK put` or `#ERR …` | write preset to SD + flash mirror. `<len>` ≤ 16384 |
-| `apply <len>` | `#SEND` → send exactly `<len>` bytes → `#OK apply rev=5` or `#ERR line <n>: …` | parse + apply live **without saving** — used by the editor for live tweaking. On failure the previous patch keeps running. |
+| `apply <len>` | `#SEND` → send exactly `<len>` bytes → `#OK apply rev=5 fp=9f2c1a3b-1234` or `#ERR line <n>: …` | parse + apply live **without saving** — used by the editor for live tweaking. On failure the previous patch normally keeps running; a rare mid-apply failure falls back to dry bypass, which clears `fp` and bumps `rev` so clients notice. |
 | `rm <name>` | `#OK rm` or `#ERR …` | delete preset from SD + mirror |
-| `next` / `prev` | `#OK load <name>` or `#ERR …` | cycle presets (same as footswitches); presets that fail to load are skipped |
+| `next` / `prev` | `#OK load <name> rev=… fp=…` or `#ERR …` | cycle presets (same as footswitches); presets that fail to load are skipped |
 | `bypass on|off|toggle` | `#OK bypass on` | FX bypass |
 | `vol <0.0–1.0>` | `#OK vol 0.70` | codec headphone/line volume |
 | `source line` / `source usb` | `#OK source usb` | instrument source: the line input, or the USB audio stream from the computer (a DI recording or backing track then runs through the effects and the looper; the processed result returns over USB). Also `input(USB)` in `settings.txt`. |
@@ -38,7 +38,7 @@ It is designed to be pleasant for humans *and* trivially parseable by the Studio
 | `loop rm <name>` | `#OK loop rm` | delete a loop file |
 | `loop get <name>` | `#FILE <name> <len>\n` + bytes + `\n#END\n` | download a loop WAV (streamed from the card) |
 | `loop put <name> <len>` | `#SEND` → send `<len>` bytes → `#OK loop put` | upload a WAV to `/loops` (streamed to the card, ≤ 8 MB, 10 s idle timeout; a failed upload leaves the previous file intact); follow with `loop load` to hear it. Names may omit `.wav`. |
-| `tone [ms] [freq] [level]` | `#OK tone 1000` | **firmware 2.2.2+** — a quiet diagnostic sine, mixed in *after* the preset graph (the running patch, the loop and USB recordings are untouched). Stops by itself; clamps: 100–5000 ms (default 1000), 40–5000 Hz (default 440), level ≤ 0.30 (default 0.15). It shows on `peak_out`, so a UI can prove the pedal is producing signal. |
+| `tone [ms] [freq] [level]` | `#OK tone 1000` | **firmware 2.2.2+** — a quiet diagnostic sine, mixed in *after* the preset graph and the USB tap: the running patch, the loop and USB recordings are untouched, and the tone reaches the **analogue headphone/line out only**. Stops by itself (expiry is polled from the main loop *and* inside the blocking counted-transfer loops, so a long `put`/`get` cannot delay it); clamps: 100–5000 ms (default 1000), 40–5000 Hz (default 440), level ≤ 0.05 (default 0.02 — a diagnostic beep, not a reference tone). It shows on `peak_out`, which proves **digital** signal reaches the output stage — the analogue path (codec, jack, cable, speaker) still cannot be verified in software. |
 | `tone off` | `#OK tone off` | stop the test tone early |
 | `help` | human text | command summary |
 
@@ -82,13 +82,13 @@ a `note` argument makes the group respond to that note only (drum pads).
   "preset": {"index": 1, "count": 5, "name": "02_ambient.txt", "title": "Ambient Swell"},
   "bypass": false, "volume": 0.70, "source": "line",
   "psram_mb": 16, "sd": true, "flash": true,
-  "rev": 4, "tone": false, "midi": {"rx": 128, "trig": 96, "voices": 3}
+  "rev": 4, "fp": "9f2c1a3b-1234", "tone": false, "midi": {"rx": 128, "trig": 96, "voices": 3}
 }
 ```
 
 `loop.state` ∈ `empty | recording | playing | overdubbing | stopped`.
 
-The last line (`rev`, `tone`, `midi`) is **firmware 2.2.2+**; older firmware simply
+The last line (`rev`, `fp`, `tone`, `midi`) is **firmware 2.2.2+**; older firmware simply
 omits it and clients must treat those facts as unknown rather than guessing.
 
 ## Diagnostics (firmware 2.2.2+)
@@ -98,8 +98,22 @@ omits it and clients must treat those facts as unknown rather than guessing.
   (footswitch, MIDI program change, another editor) apart from "still running
   what I confirmed" — even when the preset *name* did not change. `#OK load`/
   `#OK apply` echo the new value as `rev=N`.
+- `fp` is a change-detection fingerprint of the running patch: 32-bit FNV-1a over the raw
+  bytes that were successfully applied, plus their length, as `hhhhhhhh-len`
+  (lower-case hex). Empty when no patch is running (boot before the first load,
+  or the dry-bypass fallback after a rare mid-apply failure — both of which
+  also bump `rev`). This is what makes a read-back trustworthy: a client that
+  does `get <name>` after `#OK load <name> …` may still be reading a file that
+  another client overwrote *after* it was loaded — a revision counter cannot
+  catch that, but hashing the fetched bytes and comparing against `fp` can.
+  `#OK load`/`#OK apply` echo it as `fp=…`. Capability detection is by field
+  presence (a client should key on `fp`/`rev`/`tone` existing in `#STATUS`),
+  not by parsing the firmware version string. FNV is a change detector, not
+  a cryptographic integrity or authentication check.
 - `tone` reports whether the diagnostic test tone is sounding; its start and
-  auto-stop also push `#EVT {"tone":true|false}`.
+  auto-stop also push `#EVT {"tone":true|false}`. Media/transfer commands stop
+  the tone before blocking work. Expiry is serviced by the main loop, not a
+  hardware watchdog; a stalled main loop can delay it.
 - `midi.rx` counts USB MIDI note on/off events the pedal received; `midi.trig`
   counts voices that actually fired (the serial `note` command drives the same
   allocator and counts in `trig` too); `midi.voices` is how many voice units the

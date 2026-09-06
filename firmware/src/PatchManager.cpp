@@ -323,6 +323,12 @@ void PatchManager::unloadPatch()
     for (auto &c : cache_) c.inUse = false;
     AudioInterrupts();
     setBypass(true);
+    // The previous patch is gone (this is also the dry-bypass fallback after a
+    // rare mid-apply failure): say so, instead of letting a client keep an
+    // out-of-date "confirmed running" claim alive.
+    patchRev_++;
+    patchFpHash_ = 0;
+    patchFpLen_ = 0;
     title_ = "";
 }
 
@@ -618,6 +624,12 @@ bool PatchManager::loadPatch(const char *text, size_t len, String &err, String &
     title_ = doc.title;
     setBypass(!wetPath);   // engage the chain if it reaches fxout, else stay dry
     patchRev_++;           // a new patch is confirmed running (see patchRev())
+    {                      // exact identity of what is now running (see patchFp())
+        uint32_t h = 2166136261u;
+        for (size_t i = 0; i < len; i++) { h ^= (uint8_t)text[i]; h *= 16777619u; }
+        patchFpHash_ = h;
+        patchFpLen_ = (uint32_t)len;
+    }
     return true;
 }
 

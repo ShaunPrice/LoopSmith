@@ -18,7 +18,7 @@ const src = html.slice(html.lastIndexOf('/*', beginAt), html.indexOf('*/', endAt
 const mod = { exports: {} };
 new Function('module', src)(mod);
 const { createDiagnostics, diagFingerprint, diagBindingsFromText,
-        diagCoverageGaps, diagTitleFromText, diagRevFromAck } = mod.exports;
+        diagCoverageGaps, diagTitleFromText, diagRevFromAck, diagFpFromAck } = mod.exports;
 
 // ---- a controllable environment: fake clock, timers, device, preset store ----
 function makeEnv(opts = {}) {
@@ -44,6 +44,7 @@ function makeEnv(opts = {}) {
   const flush = () => new Promise(r => setImmediate(r));
   return {
     deps, sends, gets, presets,
+    fpOf: name => diagFingerprint(presets[name]),
     advance: ms => { now += ms; },
     // run every timer that is due, then let promise chains settle
     async run() {
@@ -55,10 +56,23 @@ function makeEnv(opts = {}) {
 const USES_CH1 = new Map([[1, new Set([60, 64])]]);
 
 // ---------------------------------- pure helpers ----------------------------
-test('fingerprint is stable for equal text and differs otherwise', () => {
+test('fingerprint is FNV-1a over UTF-8 bytes plus length, matching the firmware', () => {
   assert.equal(diagFingerprint('abc\n'), diagFingerprint('abc\n'));
   assert.notEqual(diagFingerprint('abc\n'), diagFingerprint('abd\n'));
-  assert.match(diagFingerprint(''), /^[0-9a-f]{8}$/);
+  // standard FNV-1a 32-bit vectors — pinned so editor, firmware
+  // (PatchManager::patchFp) and pi/fake_pedal.py (patch_fp) agree literally
+  assert.equal(diagFingerprint(''), '811c9dc5-0');
+  assert.equal(diagFingerprint('a'), 'e40c292c-1');
+  assert.equal(diagFingerprint('foobar'), 'bf9cf968-6');
+  // multi-byte characters hash as UTF-8 bytes, not UTF-16 code units
+  assert.match(diagFingerprint('é'), /-2$/);
+});
+
+test('fp ack parser', () => {
+  assert.equal(diagFpFromAck('apply rev=5 fp=9f2c1a3b-1234'), '9f2c1a3b-1234');
+  assert.equal(diagFpFromAck('load 02_x.txt rev=7 fp=00ff00ff-9 (warnings: x)'), '00ff00ff-9');
+  assert.equal(diagFpFromAck('apply rev=5'), null);
+  assert.equal(diagFpFromAck(''), null);
 });
 
 test('bindings parse melodic, drum-pad and hand-written custom .midi() calls', () => {
@@ -105,16 +119,42 @@ test('a successful apply confirms the exact text as running', () => {
   assert.equal(d.coverageForUses(new Map([[2, new Set([60])]])).state, 'warn');
 });
 
-test('a failed apply keeps the previous confirmation (firmware keeps its graph)', () => {
+test('failed apply on LEGACY firmware invalidates — dry fallback cannot be ruled out', () => {
   const env = makeEnv();
   const d = createDiagnostics(env.deps);
   d.onConnect();
-  d.onApplyResult(true, 'osc.midi(1, a)\n', 'apply rev=5');
-  const before = d.running.fingerprint;
+  d.onApplyResult(true, 'osc.midi(1, a)\n', 'apply');       // no fp: legacy
+  assert.ok(d.running);
   d.onApplyResult(false, 'broken text', 'line 3: unknown object');
-  assert.equal(d.running.fingerprint, before);
+  assert.equal(d.running, null, 'without a fingerprint Studio cannot promise the prior patch survived');
+  assert.match(d.runningUnknownWhy, /cannot say which/);
   assert.equal(d.lastApply.ok, false);
   assert.match(d.lastApply.error, /line 3/);
+});
+
+test('failed apply on fp firmware: kept while #STATUS fp matches, invalidated when fp goes empty (dry fallback)', () => {
+  const env = makeEnv();
+  const d = createDiagnostics(env.deps);
+  d.onConnect();
+  const text = 'osc.midi(1, a)\n';
+  const fp = diagFingerprint(text);
+  d.onApplyResult(true, text, 'apply rev=5 fp=' + fp);
+  d.onApplyResult(false, 'broken text', 'line 3: unknown object');
+  assert.ok(d.running, 'the firmware will tell us via fp if the graph was swapped');
+  d.onStatus({ rev: 5, fp });                                // ordinary parse failure: graph kept
+  assert.ok(d.running);
+  d.onStatus({ rev: 6, fp: '' });                            // rare mid-apply hard failure: dry bypass
+  assert.equal(d.running, null);
+  assert.match(d.runningUnknownWhy, /changed on the pedal/);
+});
+
+test('an apply whose ack fingerprint disagrees with the sent bytes is not claimed', () => {
+  const env = makeEnv();
+  const d = createDiagnostics(env.deps);
+  d.onConnect();
+  d.onApplyResult(true, 'osc.midi(1, a)\n', 'apply rev=2 fp=deadbeef-999');
+  assert.equal(d.running, null);
+  assert.match(d.runningUnknownWhy, /different fingerprint/);
 });
 
 // ------------------------------ external changes ----------------------------
@@ -150,6 +190,7 @@ test('an external preset change (#EVT) invalidates and re-confirms by reading th
   d.onApplyResult(true, 'other text\n', 'apply rev=2');
   d.onEvent({ preset: '01_a.txt' });                     // footswitch / program change
   assert.equal(d.running, null, 'invalidated until the content is read back');
+  d.onStatus({ rev: 3, fp: env.fpOf('01_a.txt') });      // the device says what runs now
   env.advance(300); await env.run();
   assert.equal(d.running.name, '01_a.txt');
   assert.equal(d.running.source, 'load');
@@ -168,14 +209,15 @@ test('an empty #EVT preset (live-applied patch) does not invalidate an apply', (
   assert.equal(d.running.source, 'apply');
 });
 
-test('a device load ack carries the rev into the confirmation', async () => {
+test('a device load ack carries rev and fp into the confirmation', async () => {
   const env = makeEnv();
   const d = createDiagnostics(env.deps);
   d.onConnect();
-  d.onDeviceLoad('01_a.txt', 'load 01_a.txt rev=9');
+  d.onDeviceLoad('01_a.txt', 'load 01_a.txt rev=9 fp=' + env.fpOf('01_a.txt'));
   env.advance(300); await env.run();
   assert.equal(d.running.rev, 9);
   assert.equal(d.running.name, '01_a.txt');
+  assert.equal(d.running.fingerprint, env.fpOf('01_a.txt'));
 });
 
 test('rapid next/next/next debounces to one read-back of the final preset', async () => {
@@ -184,11 +226,11 @@ test('rapid next/next/next debounces to one read-back of the final preset', asyn
   } });
   const d = createDiagnostics(env.deps);
   d.onConnect();
-  d.onDeviceLoad('01_a.txt', 'load 01_a.txt rev=2');
+  d.onDeviceLoad('01_a.txt', 'load 01_a.txt rev=2 fp=' + env.fpOf('01_a.txt'));
   env.advance(50);
-  d.onDeviceLoad('02_b.txt', 'load 02_b.txt rev=3');
+  d.onDeviceLoad('02_b.txt', 'load 02_b.txt rev=3 fp=' + env.fpOf('02_b.txt'));
   env.advance(50);
-  d.onDeviceLoad('03_c.txt', 'load 03_c.txt rev=4');
+  d.onDeviceLoad('03_c.txt', 'load 03_c.txt rev=4 fp=' + env.fpOf('03_c.txt'));
   env.advance(300); await env.run();
   assert.deepEqual(env.gets, ['03_c.txt']);
   assert.equal(d.running.name, '03_c.txt');
@@ -211,7 +253,7 @@ test('disconnect invalidates and a confirm still in flight cannot land', async (
   const env = makeEnv();
   const d = createDiagnostics(env.deps);
   d.onConnect();
-  d.onDeviceLoad('01_a.txt', 'load 01_a.txt rev=2');
+  d.onDeviceLoad('01_a.txt', 'load 01_a.txt rev=2 fp=' + env.fpOf('01_a.txt'));
   d.onDisconnect('disconnected');                       // before the debounce fires
   env.advance(300); await env.run();
   assert.equal(d.running, null);
@@ -229,8 +271,90 @@ test('reconnect starts honestly unknown and re-confirms from the device list', a
   assert.equal(d.running, null);
   assert.match(d.runningUnknownWhy, /nothing confirmed since connecting/);
   d.confirmByName('01_a.txt');                          // what diagOnConnect does
+  d.onStatus({ rev: 3, fp: env.fpOf('01_a.txt') });     // the 4 Hz stream provides the identity
   env.advance(300); await env.run();
   assert.equal(d.running.name, '01_a.txt');
+});
+
+// -------------------- read-back is verified by fingerprint ------------------
+test('CODEX #1: load A, put different B under the SAME name — recheck must not claim B is running', async () => {
+  const A = '// name: A\nosc.midi(1, lead)\n';
+  const B = '// name: B\nkick.midi(10, kit, 36)\n';
+  const env = makeEnv({ presets: { 'x.txt': A } });
+  const d = createDiagnostics(env.deps);
+  d.onConnect();
+  const fpA = diagFingerprint(A);
+  d.onDeviceLoad('x.txt', 'load x.txt rev=2 fp=' + fpA);
+  env.advance(300); await env.run();
+  assert.equal(d.running.fingerprint, fpA, 'A is confirmed running');
+
+  env.presets['x.txt'] = B;                    // another client overwrites the file, no load
+  d.onStatus({ rev: 2, fp: fpA });             // the device still runs A
+  d.confirmByName('x.txt');                    // the Re-check button
+  env.advance(300); await env.run();
+  assert.ok(d.running, 'the earlier confirmation is still true and must survive');
+  assert.equal(d.running.fingerprint, fpA, 'still A — never B');
+  assert.ok(!d.running.bindings.notes.has(10), 'B’s drum binding must not be claimed');
+});
+
+test('CODEX #1: the same overwrite when nothing is confirmed yields unknown, not B', async () => {
+  const A = '// name: A\nosc.midi(1, lead)\n';
+  const B = '// name: B\nkick.midi(10, kit, 36)\n';
+  const env = makeEnv({ presets: { 'x.txt': B } });   // the file already reads back as B
+  const d = createDiagnostics(env.deps);
+  d.onConnect();
+  const fpA = diagFingerprint(A);
+  d.onStatus({ rev: 2, fp: fpA });                    // ...but the device runs A
+  d.onDeviceLoad('x.txt', 'load x.txt rev=2 fp=' + fpA);
+  env.advance(300); await env.run();
+  assert.equal(d.running, null);
+  assert.match(d.runningUnknownWhy, /no longer matches the running patch/);
+  assert.equal(d.coverageForUses(new Map([[10, new Set([36])]])).state, 'unknown');
+});
+
+test('CODEX #1: legacy firmware — a read-back by name alone is never confirmed', async () => {
+  const env = makeEnv();
+  const d = createDiagnostics(env.deps);
+  d.onConnect();
+  d.onDeviceLoad('01_a.txt', 'load 01_a.txt');        // no rev, no fp: old firmware
+  env.advance(300); await env.run();
+  assert.equal(d.running, null);
+  assert.match(d.runningUnknownWhy, /cannot prove the stored file matches/);
+  // an apply still confirms on legacy (exact bytes + device ack)
+  d.onApplyResult(true, 'osc.midi(1, a)\n', 'apply');
+  assert.ok(d.running);
+});
+
+test('a read-back that beat the first fingerprinting status retries and then confirms', async () => {
+  const env = makeEnv();
+  const d = createDiagnostics(env.deps);
+  d.onConnect();
+  d.confirmByName('01_a.txt');                        // connect-time confirm, no status yet
+  env.advance(300); await env.run();
+  assert.equal(d.running, null);
+  assert.match(d.runningUnknownWhy, /cannot prove|waiting for the pedal/);
+  d.onStatus({ rev: 1, fp: env.fpOf('01_a.txt') });   // first fingerprinting status arrives
+  env.advance(300); await env.run();
+  assert.equal(d.running.name, '01_a.txt');
+});
+
+test('CODEX #5: an in-flight read-back superseded by a newer load never lands', async () => {
+  const A = 'osc.midi(1, a)\n', C = 'osc.midi(3, c)\n';
+  const pending = {};
+  const env = makeEnv({ get: name => new Promise(res => { pending[name] = res; }) });
+  const d = createDiagnostics(env.deps);
+  d.onConnect();
+  d.onDeviceLoad('a.txt', 'load a.txt rev=2 fp=' + diagFingerprint(A));
+  env.advance(300); await env.run();                  // a.txt fetch is now in flight
+  d.onDeviceLoad('c.txt', 'load c.txt rev=3 fp=' + diagFingerprint(C));
+  pending['a.txt'](A);                                // the OLD response arrives late
+  await env.run();
+  assert.equal(d.running, null, 'the stale a.txt response must not be claimed');
+  env.advance(300); await env.run();                  // c.txt fetch goes out
+  pending['c.txt'](C);
+  await env.run();
+  assert.equal(d.running.fingerprint, diagFingerprint(C));
+  assert.ok(d.running.bindings.any.has(3));
 });
 
 // ------------------------------ editor vs running ---------------------------
@@ -329,7 +453,10 @@ test('findings: volume, source and downstream-of-the-jack checks', () => {
   assert.match(texts, /output is silent/);
   d.onStatus({ volume: 0.7, source: 'line', bypass: false, peak_in: 0.4, peak_out: 0.5 });
   const ok = d.findings(0).find(f => f.level === 'ok');
-  assert.match(ok.text, /downstream of the OUT jack/);
+  // CODEX #2: a digital peak may not be oversold as proof of the analogue path
+  assert.match(ok.text, /Digital audio/);
+  assert.match(ok.text, /cannot verify the analogue path/);
+  assert.doesNotMatch(ok.text, /problem is downstream/);
 });
 
 test('findings: disconnected says connect first, and nothing else', () => {

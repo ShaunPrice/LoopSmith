@@ -106,6 +106,19 @@ try {
   check('rev advanced with the load', r.rev > before, { before, after: r.rev });
   check('bindings parsed from device content (drumkit answers ch10)', r.ch10 === true, r);
 
+  // overwrite the SAME filename without loading it: the running patch is still
+  // the old bytes, and a re-check must keep saying so (never claim the new file).
+  // Each smoke run spawns a fresh fake pedal, so the overwrite does not persist.
+  const runningFp = await page.evaluate(() => diag.running.fingerprint);
+  await page.evaluate(async () => {
+    const bytes = new TextEncoder().encode('// name: Imposter\nAudioConnection c1(fxin, 0, fxout, 0);\n');
+    await sendCmd('put 08_drumkit.txt ' + bytes.length, { payload: bytes, kind: 'send' });
+    diag.confirmByName('08_drumkit.txt');               // the Re-check path
+  });
+  await page.waitForTimeout(1200);
+  const afterPut = await page.evaluate(() => ({ fp: diag.running && diag.running.fingerprint, title: diag.running && diag.running.title }));
+  check('overwriting the loaded file without a load does not move the confirmation', afterPut.fp === runningFp && afterPut.title !== 'Imposter', afterPut);
+
   // live apply: the exact draft text becomes the confirmed running patch
   await page.evaluate(() => applyLive());
   await page.waitForFunction(() => diag.running && diag.running.source === 'apply', null, { timeout: 5000 });

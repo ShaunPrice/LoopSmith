@@ -8,12 +8,13 @@ framed transfers they ride along with.
 """
 import json
 import os
+import re
 import sys
 import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fake_pedal import FW, FakePedal, TONE_MS_MIN  # noqa: E402
+from fake_pedal import FW, FakePedal, TONE_MS_MIN, patch_fp  # noqa: E402
 
 PRESET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sdcard", "presets")
 
@@ -72,8 +73,12 @@ class TestRevision(unittest.TestCase):
         send(pedal, out, "load 02_ambient.txt")
         line = out.lines()[0]
         self.assertTrue(line.startswith("#OK load 02_ambient.txt rev="), line)
-        self.assertEqual(int(line.rsplit("rev=", 1)[1]), status(pedal)["rev"])
-        self.assertEqual(status(pedal)["rev"], 2)
+        m = re.search(r"rev=(\d+) fp=([0-9a-f]{8}-\d+)", line)
+        self.assertIsNotNone(m, line)
+        st = status(pedal)
+        self.assertEqual(int(m.group(1)), st["rev"])
+        self.assertEqual(m.group(2), st["fp"])
+        self.assertEqual(st["rev"], 2)
 
     def test_next_prev_bump_rev(self):
         pedal, out = mk()
@@ -96,9 +101,10 @@ class TestRevision(unittest.TestCase):
         self.assertEqual(out.lines()[0], "#SEND")
         out.clear()
         pedal.feed(payload, out)
-        self.assertEqual(out.lines()[0], "#OK apply rev=2")
+        self.assertEqual(out.lines()[0], "#OK apply rev=2 fp=" + patch_fp(payload))
         st = status(pedal)
         self.assertEqual(st["rev"], 2)
+        self.assertEqual(st["fp"], patch_fp(payload))    # exact identity of the applied bytes
         self.assertEqual(st["preset"]["index"], -1)      # live patch, not a stored preset
         self.assertEqual(st["midi"]["voices"], 1)        # .midi() binding in the applied text
 
@@ -120,6 +126,52 @@ class TestRevision(unittest.TestCase):
         st = status(pedal)
         self.assertEqual(st["rev"], 3)
         self.assertGreaterEqual(st["preset"]["index"], 0)
+
+
+class TestFingerprint(unittest.TestCase):
+    def test_fnv1a_vectors_pin_the_algorithm(self):
+        # standard FNV-1a 32-bit vectors — the editor (diagFingerprint) and the
+        # firmware (PatchManager::patchFp) must produce the same strings
+        self.assertEqual(patch_fp(b""), "")               # no patch = empty identity
+        self.assertEqual(patch_fp(b"a"), "e40c292c-1")
+        self.assertEqual(patch_fp(b"foobar"), "bf9cf968-6")
+
+    def test_boot_reports_fp_of_the_loaded_preset(self):
+        pedal, _ = mk()
+        st = status(pedal)
+        self.assertEqual(st["fp"], patch_fp(pedal.presets[pedal.name()]))
+
+    def test_put_same_name_does_not_change_running_fp(self):
+        # The scenario a revision counter cannot catch: load A, then another
+        # client overwrites the SAME filename with B without loading it. The
+        # running patch is still A, so fp must still be A's — a client doing
+        # get(name) gets B, sees the mismatch, and must not claim B is running.
+        pedal, out = mk()
+        send(pedal, out, "load 02_ambient.txt")
+        fp_a = status(pedal)["fp"]
+        rev_a = status(pedal)["rev"]
+        body_b = b"// name: Different\nAudioConnection c1(fxin, 0, fxout, 0);\n"
+        out.clear()
+        send(pedal, out, "put 02_ambient.txt %d" % len(body_b))
+        pedal.feed(body_b, out)
+        self.assertIn("#OK put", out.lines())
+        st = status(pedal)
+        self.assertEqual(st["fp"], fp_a, "running fp must be a snapshot of the loaded bytes")
+        self.assertEqual(st["rev"], rev_a, "put alone must not look like a patch change")
+        self.assertNotEqual(patch_fp(body_b), fp_a, "the stored file now differs from running")
+        # ... and an explicit reload DOES move the running identity to B
+        out.clear()
+        send(pedal, out, "load 02_ambient.txt")
+        self.assertEqual(status(pedal)["fp"], patch_fp(body_b))
+
+    def test_apply_moves_fp_load_moves_it_back(self):
+        pedal, out = mk()
+        payload = b"osc.midi(1, lead)\n"
+        send(pedal, out, "apply %d" % len(payload))
+        pedal.feed(payload, out)
+        self.assertEqual(status(pedal)["fp"], patch_fp(payload))
+        send(pedal, out, "load 01_clean.txt")
+        self.assertEqual(status(pedal)["fp"], patch_fp(pedal.presets["01_clean.txt"]))
 
 
 class TestTone(unittest.TestCase):

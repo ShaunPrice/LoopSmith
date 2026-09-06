@@ -65,13 +65,19 @@
 
 // ---------------------------------------------------------------- diagnostics
 // The `tone` serial command plays a quiet sine straight into the output stage
-// (after the preset graph, so the running patch is never touched) and stops
-// itself. Clamps keep a mistyped command from being loud or endless.
+// (after the preset graph AND the USB tap, so the running patch, the loop and
+// USB recordings are never touched — the tone reaches the headphone/line out
+// only). It stops itself: the expiry is polled from loop() via Pedal::poll()
+// and additionally from inside the blocking counted-transfer loops in
+// SerialProtocol. Media/transfer commands also stop it before blocking work.
+// Expiry is main-loop serviced; it is not a hardware watchdog deadline.
+// Clamps keep a mistyped command from being loud or endless; the level is
+// deliberately conservative (a diagnostic beep, not a reference tone).
 #define TONE_MS_MIN        100
 #define TONE_MS_MAX        5000
 #define TONE_MS_DEFAULT    1000
 #define TONE_FREQ_MIN      40.0f
 #define TONE_FREQ_MAX      5000.0f
 #define TONE_FREQ_DEFAULT  440.0f
-#define TONE_LEVEL_MAX     0.30f
-#define TONE_LEVEL_DEFAULT 0.15f
+#define TONE_LEVEL_MAX     0.05f
+#define TONE_LEVEL_DEFAULT 0.02f

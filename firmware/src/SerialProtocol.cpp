@@ -59,6 +59,7 @@ bool SerialProtocol::receiveCounted(char **data, size_t len)
     size_t got = 0;
     uint32_t deadline = millis() + 5000;
     while (got < len && (int32_t)(deadline - millis()) > 0) {
+        pedal_->patch.pollTone();   // the test tone must stop on time even mid-transfer
         int avail = Serial.available();
         if (avail > 0) {
             size_t want = len - got;
@@ -132,7 +133,7 @@ void SerialProtocol::emitStatus()
         "\"loop\":{\"state\":\"%s\",\"len_s\":%.2f,\"pos_s\":%.2f,\"can_undo\":%s,\"seconds_max\":%.1f},"
         "\"preset\":{\"index\":%d,\"count\":%d,\"name\":\"%s\",\"title\":\"%s\"},"
         "\"bypass\":%s,\"volume\":%.2f,\"source\":\"%s\",\"psram_mb\":%u,\"sd\":%s,\"flash\":%s,"
-        "\"rev\":%lu,\"tone\":%s,\"midi\":{\"rx\":%lu,\"trig\":%lu,\"voices\":%d}}",
+        "\"rev\":%lu,\"fp\":\"%s\",\"tone\":%s,\"midi\":{\"rx\":%lu,\"trig\":%lu,\"voices\":%d}}",
         AudioProcessorUsage(), AudioProcessorUsageMax(),
         AudioMemoryUsage(), AudioMemoryUsageMax(),
         pedal_->patch.peakIn(), pedal_->patch.peakOut(),
@@ -146,6 +147,7 @@ void SerialProtocol::emitStatus()
         pedal_->store.sdPresent() ? "true" : "false",
         pedal_->store.flashPresent() ? "true" : "false",
         (unsigned long)pedal_->patch.patchRev(),
+        pedal_->patch.patchFp().c_str(),
         pedal_->patch.toneActive() ? "true" : "false",
         (unsigned long)pedal_->midiRxNotes,
         (unsigned long)pedal_->patch.noteTriggers(),
@@ -193,6 +195,10 @@ void SerialProtocol::handleLine(char *line)
     }
     if (argc == 0) return;
     String cmd = argv[0];
+    // End diagnostics before operations that may block on media or transfers.
+    if (cmd == "get" || cmd == "put" || cmd == "apply" || cmd == "loop" ||
+        cmd == "load" || cmd == "next" || cmd == "prev" || cmd == "rm" || cmd == "list")
+        pedal_->patch.toneStop();
 
     if (cmd == "ping")   { emitPong(); return; }
     if (cmd == "status") { emitStatus(); return; }
@@ -212,8 +218,9 @@ void SerialProtocol::handleLine(char *line)
             if (!isdigit((unsigned char)arg[i])) { isNum = false; break; }
         bool ok = isNum ? pedal_->loadPresetByIndex(arg.toInt(), err)
                         : pedal_->loadPresetByName(arg, err);
-        if (ok) Serial.printf("#OK load %s rev=%lu\n", pedal_->presetName().c_str(),
-                              (unsigned long)pedal_->patch.patchRev());
+        if (ok) Serial.printf("#OK load %s rev=%lu fp=%s\n", pedal_->presetName().c_str(),
+                              (unsigned long)pedal_->patch.patchRev(),
+                              pedal_->patch.patchFp().c_str());
         else    Serial.printf("#ERR %s\n", err.c_str());
         return;
     }
@@ -221,8 +228,9 @@ void SerialProtocol::handleLine(char *line)
     if (cmd == "next" || cmd == "prev") {
         String err;
         if (pedal_->stepPreset(cmd == "next" ? +1 : -1, err))
-            Serial.printf("#OK load %s rev=%lu\n", pedal_->presetName().c_str(),
-                          (unsigned long)pedal_->patch.patchRev());
+            Serial.printf("#OK load %s rev=%lu fp=%s\n", pedal_->presetName().c_str(),
+                          (unsigned long)pedal_->patch.patchRev(),
+                          pedal_->patch.patchFp().c_str());
         else
             Serial.printf("#ERR %s\n", err.c_str());
         return;
@@ -273,10 +281,13 @@ void SerialProtocol::handleLine(char *line)
                 pedal_->presetIndex = -1;  // live patch, not a stored preset
                 if (warn.length()) {
                     warn.replace("\n", "; ");
-                    Serial.printf("#OK apply rev=%lu (warnings: %s)\n",
-                                  (unsigned long)pedal_->patch.patchRev(), warn.c_str());
+                    Serial.printf("#OK apply rev=%lu fp=%s (warnings: %s)\n",
+                                  (unsigned long)pedal_->patch.patchRev(),
+                                  pedal_->patch.patchFp().c_str(), warn.c_str());
                 } else {
-                    Serial.printf("#OK apply rev=%lu\n", (unsigned long)pedal_->patch.patchRev());
+                    Serial.printf("#OK apply rev=%lu fp=%s\n",
+                                  (unsigned long)pedal_->patch.patchRev(),
+                                  pedal_->patch.patchFp().c_str());
                 }
             } else {
                 Serial.printf("#ERR %s\n", err.c_str());
@@ -381,6 +392,7 @@ void SerialProtocol::handleLine(char *line)
             bool hostGone = false;
             if (buf) {
                 while (left && !hostGone) {
+                    pedal_->patch.pollTone();          // keep the tone's auto-stop on time
                     int n = f.read(buf, left > 4096 ? 4096 : left);
                     if (n <= 0) break;                 // read error: pad below
                     hostGone = !writeAll(buf, n, 8000);
@@ -409,6 +421,7 @@ void SerialProtocol::handleLine(char *line)
             long got = 0; bool writeFail = false, timedOut = false;
             uint32_t last = millis();
             while (got < len) {
+                pedal_->patch.pollTone();              // keep the tone's auto-stop on time
                 int avail = Serial.available();
                 if (avail <= 0) {
                     if (millis() - last > 10000) { timedOut = true; break; }   // 10 s idle timeout
@@ -456,9 +469,10 @@ void SerialProtocol::handleLine(char *line)
     }
 
     if (cmd == "tone") {
-        // tone [ms] [freq] [level] — quiet diagnostic sine into the output
-        // stage (the running patch is untouched); stops by itself. `tone off`
-        // stops it early. Clamped: 100–5000 ms, 40–5000 Hz, level ≤ 0.30.
+        // tone [ms] [freq] [level] — quiet diagnostic sine into the analogue
+        // output stage only (the running patch, loop and USB audio are all
+        // untouched); stops by itself. `tone off` stops it early.
+        // Clamped: 100–5000 ms, 40–5000 Hz, level ≤ 0.05.
         String a = argc > 1 ? argv[1] : "";
         if (a == "off" || a == "stop") {
             pedal_->patch.toneStop();
@@ -506,7 +520,7 @@ void SerialProtocol::handleLine(char *line)
         Serial.println("  looper tap|stop|undo|clear | note on <n> <vel> [ch] | note off <n> [ch]");
         Serial.println("  switches | switch <1-6> <tap> <hold> [note]");
         Serial.println("  loops | loop save|load|rm|get|put <name.wav> [len]");
-        Serial.println("  tone [ms] [freq] [level] | tone off   (quiet self-stopping test tone)");
+        Serial.println("  tone [ms] [freq] [level] | tone off   (quiet self-stopping test tone, analogue out only)");
         return;
     }
 

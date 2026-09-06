@@ -75,6 +75,19 @@ public:
     uint32_t patchRev() const { return patchRev_; }
     uint32_t noteTriggers() const { return noteTriggers_; }
 
+    // Exact identity of the running patch: FNV-1a (32-bit) over the raw bytes
+    // that were successfully applied, plus their length ("hhhhhhhh-len").
+    // A revision counter alone cannot prove that a file read back by name
+    // still equals the running patch (the file may have been overwritten
+    // without a reload) — this can. Empty when no patch is running (boot,
+    // or the dry-bypass fallback after a rare mid-apply failure).
+    String patchFp() const {
+        if (!patchFpLen_) return "";
+        char b[24];
+        snprintf(b, sizeof(b), "%08lx-%lu", (unsigned long)patchFpHash_, (unsigned long)patchFpLen_);
+        return String(b);
+    }
+
     // Diagnostic test tone: a quiet sine mixed in AFTER the preset graph and
     // the USB recording tap, so the running patch, the loop and recordings are
     // untouched and the tone stops by itself (pollTone(), called every loop).
@@ -162,6 +175,8 @@ private:
     float  volume_ = DEFAULT_VOLUME;
     float  lastPeakIn_ = 0, lastPeakOut_ = 0;
     uint32_t patchRev_ = 0;             // bumped on every successful loadPatch
+    uint32_t patchFpHash_ = 0;          // FNV-1a of the running patch's bytes
+    uint32_t patchFpLen_ = 0;           // ... and their count (0 = no patch)
     uint32_t noteTriggers_ = 0;         // bumped whenever a voice unit fires
     bool     toneOn_ = false;
     uint32_t toneOffAt_ = 0;            // millis() deadline for the auto-stop

@@ -51,6 +51,17 @@ def make_sine_wav(seconds=2.0, freq=220.0, rate=LOOP_RATE, amp=0.5):
     return bytes(header + frames)
 
 
+def patch_fp(data):
+    """Exact running-patch identity, like the firmware: 32-bit FNV-1a over the
+    raw bytes plus their length ("hhhhhhhh-len"). Empty string = no patch."""
+    if not data:
+        return ""
+    h = 2166136261
+    for b in data:
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return "%08x-%d" % (h, len(data))
+
+
 def wav_seconds(data):
     """Duration of a PCM WAV (walks the chunk list; falls back to 16-bit mono 44.1k)."""
     try:
@@ -94,6 +105,10 @@ class FakePedal:
         # diagnostics (firmware 2.2.2): patch revision, test tone, MIDI evidence
         self.rev = 1 if self.presets else 0   # the boot-time preset load counts
         self.applied = None                   # live-applied patch text (index -1)
+        # fp is a SNAPSHOT of the bytes that were loaded/applied — a later `put`
+        # under the same name must not change it (the file changed, not the
+        # running patch); only load/apply do.
+        self.fp = patch_fp(self.presets.get(self.name(), b"")) if self.presets else ""
         self.tone_until = 0.0                 # time.time() deadline, 0 = off
         self.midi_rx = 0                      # note on/off received
         self.midi_trig = 0                    # voices actually triggered
@@ -132,7 +147,7 @@ class FakePedal:
                        "name": self.name(), "title": self.title_of(self.name())},
             "bypass": self.bypass, "volume": round(self.volume, 2), "source": "line",
             "psram_mb": 16, "sd": True, "flash": True,
-            "rev": self.rev, "tone": self.tone_active(),
+            "rev": self.rev, "fp": self.fp, "tone": self.tone_active(),
             "midi": {"rx": self.midi_rx, "trig": self.midi_trig, "voices": self.voices()},
         }, separators=(",", ":"))
 
@@ -191,7 +206,8 @@ class FakePedal:
                     self.index = -1
                     self.applied = payload
                     self.rev += 1
-                    out(f"#OK apply rev={self.rev}\n".encode())
+                    self.fp = patch_fp(payload)
+                    out(f"#OK apply rev={self.rev} fp={self.fp}\n".encode())
                 continue
             nl = self.buf.find(b"\n")
             if nl < 0:
@@ -227,7 +243,8 @@ class FakePedal:
                 return
             self.applied = None
             self.rev += 1
-            say(f"#OK load {self.name()} rev={self.rev}")
+            self.fp = patch_fp(self.presets[self.name()])
+            say(f"#OK load {self.name()} rev={self.rev} fp={self.fp}")
         elif cmd in ("next", "prev"):
             n = len(self.presets)
             if not n:
@@ -236,7 +253,8 @@ class FakePedal:
             self.index = (self.index + (1 if cmd == "next" else -1)) % n
             self.applied = None
             self.rev += 1
-            say(f"#OK load {self.name()} rev={self.rev}")
+            self.fp = patch_fp(self.presets[self.name()])
+            say(f"#OK load {self.name()} rev={self.rev} fp={self.fp}")
         elif cmd == "get" and len(argv) > 1:
             data = self.presets.get(argv[1])
             if data is None:

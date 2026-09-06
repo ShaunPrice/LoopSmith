@@ -12,11 +12,18 @@ node --test editor/tests/diagnostics.test.mjs
 ```
 
 Covers: fingerprint/bindings/coverage parsing (including hand-written custom
-`.midi(ch, group, note)` routing), apply success and failure, external preset
-changes (`#EVT` and `rev` drift), disconnect/reconnect invalidation, read-back
-confirmation with debounce, Editing-vs-Running-vs-differs, test-tone start /
-auto-expiry / old-firmware "unsupported", and the honesty rules of the findings
-(MIDI transmission is never presented as a confirmed trigger).
+`.midi(ch, group, note)` routing; the FNV-1a-over-UTF-8-bytes fingerprint is
+pinned to the standard test vectors so editor, firmware and fake pedal agree
+literally), apply success and failure (legacy invalidates, fp firmware
+self-invalidates on the dry-bypass fallback via `#STATUS fp`), external preset
+changes (`#EVT`, `rev` and `fp` drift), read-back confirmation that is only
+believed when its fingerprint matches the device's (a file overwritten under
+the same name after loading is never claimed), disconnect/reconnect
+invalidation with stale in-flight responses dropped, Editing-vs-Running-vs-
+differs, test-tone start / auto-expiry / old-firmware "unsupported", and the
+honesty rules of the findings (MIDI transmission is never presented as a
+confirmed trigger; a digital output peak is never oversold as proof of the
+analogue path).
 
 ## End-to-end smoke (real bridge + fake pedal + headless Chromium)
 
