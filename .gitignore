@@ -6,3 +6,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Host timing test executable
+firmware/test/host/test_timing
