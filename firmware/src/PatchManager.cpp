@@ -30,6 +30,9 @@ void PatchManager::begin()
     testTone_.frequency(TONE_FREQ_DEFAULT);
     setBypass(true);          // dry until a preset loads
 
+    outputGate.gain(1.0f);
+    recordGate.gain(1.0f);
+
     // skeleton wiring
     auto C = [this](AudioStream &a, int ap, AudioStream &b, int bp) {
         staticConns_.push_back(new AudioConnection(a, ap, b, bp));
@@ -43,19 +46,18 @@ void PatchManager::begin()
     C(bypassMix, 0, looper, 0);
     C(bypassMix, 0, outMix, 0);
     C(looper, 0, outMix, 1);
-    // monitorMix_ sits between outMix and the jacks so the diagnostic tone can
-    // be added without touching the preset graph (outMix has no free input in
-    // USB-audio builds). peakOut_ taps it too, so the tone shows on the OUT
-    // meter — measured evidence the pedal is producing signal.
+    // Diagnostic tone is audible only on analogue outputs; panic gates both paths.
     C(outMix, 0, monitorMix_, 0);
     C(testTone_, 0, monitorMix_, 1);
-    C(monitorMix_, 0, i2sOut, 0);
-    C(monitorMix_, 0, i2sOut, 1);
+    C(monitorMix_, 0, outputGate, 0);
+    C(outputGate, 0, i2sOut, 0);
+    C(outputGate, 0, i2sOut, 1);
     C(preGain, 0, peakIn_, 0);
-    C(monitorMix_, 0, peakOut_, 0);
+    C(outputGate, 0, peakOut_, 0);
 #if defined(AUDIO_INTERFACE)
-    C(outMix, 0, usbOut, 0);          // what the amp hears also goes to USB (L+R);
-    C(outMix, 0, usbOut, 1);          // tapped before monitorMix_ so the test tone stays out of recordings
+    C(outMix, 0, recordGate, 0);
+    C(recordGate, 0, usbOut, 0);
+    C(recordGate, 0, usbOut, 1);
     C(usbIn, 0, outMix, 2);           // computer audio into the output mix
     C(usbIn, 1, outMix, 3);
     outMix.gain(2, 0.5f);             // L+R summed to mono at unity overall
@@ -295,6 +297,13 @@ void PatchManager::noteOff(uint8_t channel, uint8_t note)
         }
         u.playing = -1;
     }
+}
+
+void PatchManager::allNotesOff()
+{
+    AudioNoInterrupts();
+    releaseVoices();
+    AudioInterrupts();
 }
 
 void PatchManager::releaseVoices()

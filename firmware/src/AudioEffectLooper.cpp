@@ -116,6 +116,12 @@ void AudioEffectLooper::handleCommand(uint8_t cmd)
         return;                            // clear wins over anything queued with it
     }
 
+    if (cmd & CMD_HALT) {
+        // Stop takes precedence over a simultaneous tap; repeated halt is harmless.
+        cmd &= ~(CMD_TAP_LOOP | CMD_TAP_STOP);
+        if (isrState != EMPTY && isrState != STOPPED) cmd |= CMD_TAP_STOP;
+    }
+
     if (cmd & CMD_UNDO) {
         if ((isrState == PLAYING || isrState == STOPPED) && canUndo_) {
             swapBuffers(); // undo <-> redo

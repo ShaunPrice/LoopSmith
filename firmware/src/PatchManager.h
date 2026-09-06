@@ -36,6 +36,9 @@ public:
     // Tear down the dynamic chain (bypass stays engaged until the next load).
     void unloadPatch();
 
+    void   setOutputMuted(bool muted) { outputMuted_ = muted; outputGate.gain(muted ? 0.0f : 1.0f); recordGate.gain(muted ? 0.0f : 1.0f); if (muted) toneStop(); }
+    bool   outputMuted() const { return outputMuted_; }
+    void   allNotesOff();
     void   setBypass(bool on);
     bool   bypassed() const { return bypass_; }
     void   setVolume(float v);          // 0..1 headphone volume
@@ -150,6 +153,9 @@ private:
     AudioMixer4          outMix;        // 0: live, 1: looper
     AudioMixer4          monitorMix_;   // 0: outMix (everything), 1: test tone
     AudioSynthWaveformSine testTone_;   // diagnostic tone (amplitude 0 when idle)
+    AudioAmplifier       outputGate;
+    AudioAmplifier       recordGate;
+    bool                 outputMuted_ = false;
     AudioOutputI2S       i2sOut;
     AudioAnalyzePeak     peakIn_;
     AudioAnalyzePeak     peakOut_;

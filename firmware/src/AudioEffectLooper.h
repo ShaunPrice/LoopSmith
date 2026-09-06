@@ -42,6 +42,7 @@ public:
     // --- UI thread API (footswitches / serial). Safe to call any time. ---
     void tapLoop()   { postCommand(CMD_TAP_LOOP); }  // rec -> play -> dub -> play...
     void tapStop()   { postCommand(CMD_TAP_STOP); }  // stop / restart
+    void halt()      { postCommand(CMD_HALT); } // idempotent stop; never restarts
     void undo()      { postCommand(CMD_UNDO); }      // undo <-> redo last committed pass
     void clearLoop() { postCommand(CMD_CLEAR); }
 
@@ -108,6 +109,7 @@ private:
         CMD_UNDO     = 0x04,
         CMD_CLEAR    = 0x08,
         CMD_IMPORT   = 0x10,
+        CMD_HALT     = 0x20,
     };
     static const uint32_t RAMP = LOOPER_RAMP_SAMPLES; // punch/seam ramp (~2.9 ms)
     static const uint32_t MIN_LOOP = 4410;     // refuse to close a loop under 100 ms

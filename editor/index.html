@@ -64,10 +64,13 @@ button:disabled{opacity:.4;cursor:default}
    2. Header bar
    ========================================================================== */
 #topbar{
-  height:56px;flex:0 0 56px;display:flex;align-items:center;gap:16px;
-  padding:0 16px;background:var(--panel);border-bottom:1px solid var(--border);
+  min-height:56px;flex:0 0 auto;flex-wrap:wrap;display:flex;align-items:center;gap:16px;
+  padding:8px 16px;background:var(--panel);border-bottom:1px solid var(--border);
   box-shadow:var(--shadow);z-index:20;
 }
+#performanceTransport{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex-basis:100%}
+#performMessage{font-size:12px;color:var(--text)}
+#performPosition{font-size:12px;color:var(--muted)}
 .brand{display:flex;align-items:center;gap:10px;min-width:0}
 .brand svg{flex:0 0 auto}
 .brand h1{font-size:16px;font-weight:650;letter-spacing:.2px;white-space:nowrap}
@@ -7797,12 +7800,13 @@ function midiBuildSection() {
       midiPaint();
     }
   });
-  $('#midiStopBtn').addEventListener('click', async () => { if (midi.netHost) { await midiApi('/api/midi/stop', {}); midi.status = await midiApi('/api/midi/status'); } midiLocalStop(); midiPaint(); });
+  $('#midiStopBtn').addEventListener('click', () => performanceTransport.run('Stopping MIDI', transportStopMidi));
   $('#midiLoopChk').addEventListener('change', ev => { midi.loop = ev.target.checked; });
   $('#midiCtlSel').addEventListener('change', ev => midiForwardController(ev.target.value));
   midiPaint();
 }
 function midiPaint() {
+  transportPaint();
   if (!$('#midiSec')) return;
   const tr = midiTransport();
   const port = $('#midiPort');
@@ -7855,15 +7859,8 @@ function midiPaintRows(rows, tr, st, sig) {
     const playingThis = tr === 'bridge' ? !!(st.playing && st.file === f.name) : !!(midi.player && midi.player.name === f.name);
     const play = document.createElement('button'); play.className = 'btn sm' + (playingThis ? ' accent' : '');
     play.textContent = playingThis ? '■' : '▶'; play.title = playingThis ? 'Stop' : 'Play into the pedal';
-    play.addEventListener('click', async () => {
-      if (playingThis) {
-        if (tr === 'bridge') { await midiApi('/api/midi/stop', {}); midi.status = await midiApi('/api/midi/status'); } else midiLocalStop();
-        midiPaint(); return;
-      }
-      // playback starts with the score's current controls (speed, transpose, mute/solo, A/B) — NEW
-      if (tr === 'bridge') { const j = await midiApi('/api/midi/play', Object.assign({ file: f.name, loop: midi.loop }, f.name === score.file ? scoreCtlParams() : {})); consoleLog(j.ok ? 'ok' : 'err', j.message || ''); midi.status = await midiApi('/api/midi/status'); midiPaint(); }
-      else midiLocalPlay(f, midi.loop);
-    });
+    play.disabled = performanceTransport.busy;
+    play.addEventListener('click', () => transportMidiFile(f));
     row.appendChild(play);
     if (tr === 'bridge') {
       const dl = document.createElement('a'); dl.className = 'btn sm'; dl.textContent = '⤓'; dl.href = '/midi-files/' + encodeURIComponent(f.name); dl.download = f.name; dl.title = 'Download'; row.appendChild(dl);
@@ -8464,6 +8461,7 @@ function transferActive() {
 /* ---- status / event application ---- */
 function applyStatus(st) {
   dev.status = st;
+  transportPaint();
   if (typeof st.cpu === 'number') dev.cpu = st.cpu;
   if (typeof st.cpu_max === 'number') dev.cpuMax = st.cpu_max;
   if (typeof st.mem === 'number') dev.mem = st.mem;
@@ -10168,6 +10166,109 @@ function renderAll() {
 /* ============================================================================
    11. Wiring & boot
    ========================================================================== */
+/* Persistent transport: commands are pending until acknowledged, never optimistic. */
+function createTransportGate(changed) {
+  return { busy: false, message: '', async run(label, action) {
+    if (this.busy) return false;
+    this.busy = true; this.message = label + '…'; changed();
+    try { await action(); this.message = ''; return true; }
+    catch (e) { this.message = (e && e.name === 'AbortError') ? 'Request timed out; playback state is unconfirmed. Check the connection.' : (e.message || String(e)); return false; }
+    finally { this.busy = false; changed(); }
+  }};
+}
+const performanceTransport = createTransportGate(() => { midi.listSig = ''; midiPaint(); transportPaint(); });
+async function transportRequest(path, body) {
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch(path, { signal: controller.signal, ...(body === undefined ? {} : {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
+    if (res.status === 401) { needSignIn(); throw new Error('Sign in to control playback'); }
+    const value = await res.json();
+    if (!res.ok || value.ok === false) throw new Error(value.message || 'Playback request failed');
+    return value;
+  } finally { clearTimeout(timer); }
+}
+async function transportStopMidi() {
+  if (midi.netHost) {
+    await transportRequest('/api/midi/stop', {});
+    midi.status = await transportRequest('/api/midi/status');
+    if (midi.status.playing) throw new Error('The Pi still reports MIDI playing');
+  }
+  midiLocalStop();
+}
+function transportMidiFile(file) {
+  return performanceTransport.run('Changing playback', async () => {
+    const playing = midi.netHost ? (midi.status || {}).playing && midi.status.file === file.name : midi.player && midi.player.name === file.name;
+    if (playing) { await transportStopMidi(); return; }
+    if (midi.netHost) {
+      await transportRequest('/api/midi/play', Object.assign({ file: file.name, loop: midi.loop }, file.name === score.file ? scoreCtlParams() : {}));
+      midi.status = await transportRequest('/api/midi/status');
+    } else {
+      if (!midi.out) throw new Error('Enable Web MIDI and connect a MIDI output first');
+      midiLocalPlay(file, midi.loop);
+    }
+  });
+}
+function transportInit() {
+  const bar = document.createElement('div'); bar.id = 'performanceTransport';
+  bar.setAttribute('role', 'group'); bar.setAttribute('aria-label', 'Performance transport');
+  bar.innerHTML = `<button class="btn sm" id="performPlay">▶ Play MIDI</button>
+    <button class="btn sm" id="performStop">■ Stop all</button>
+    <button class="btn sm danger" id="performPanic">Panic / mute output</button>
+    <button class="btn sm" id="performResume" hidden>Resume audio</button>
+    <span id="performPosition" class="mono"></span><span id="performMessage" role="status" aria-live="polite"></span>`;
+  $('#topbar').appendChild(bar);
+  $('#performPlay').onclick = () => {
+    const files = midi.netHost ? midi.files : midi.local;
+    const name = score.file || (midi.status || {}).file;
+    const file = files.find(f => f.name === name) || files[0];
+    if (file) transportMidiFile(file);
+    else { performanceTransport.message = 'Upload or select a MIDI file first'; transportPaint(); }
+  };
+  $('#performStop').onclick = () => performanceTransport.run('Stopping', async () => {
+    const errors = [];
+    try { await transportStopMidi(); } catch (e) { errors.push(e.message); }
+    if (link.connected && link.pedalPresent !== false) {
+      try { await sendCmd('looper halt'); await sendCmd('status'); }
+      catch (e) { errors.push('Looper stop unconfirmed: ' + e.message); }
+    }
+    if (errors.length) throw new Error(errors.join(' · '));
+  });
+  $('#performPanic').onclick = () => performanceTransport.run('Muting output', async () => {
+    // Mute first, before any network player stop latency. No loop data is erased.
+    const errors = [];
+    try { await sendCmd('panic'); await sendCmd('status'); }
+    catch (e) { errors.push('Output mute unconfirmed (requires updated firmware): ' + e.message); }
+    try { await transportStopMidi(); } catch (e) { errors.push(e.message); }
+    flushHeldNotes();
+    for (let ch = 0; ch < 16; ch++) midiSend([0xB0 | ch, 123, 0]);
+    if (errors.length) throw new Error(errors.join(' · '));
+  });
+  $('#performResume').onclick = () => performanceTransport.run('Resuming output', async () => {
+    await sendCmd('resume'); await sendCmd('status');
+  });
+  transportPaint();
+}
+function transportPaint() {
+  if (!$('#performPlay')) return;
+  const state = midi.netHost ? midi.status || {} : { playing: !!midi.player, file: midi.player && midi.player.name, position_s: midi.player && midi.player.pos };
+  const busy = performanceTransport.busy;
+  $('#performPlay').textContent = state.playing ? '■ Stop MIDI' : '▶ Play MIDI';
+  // While a different file is selected, Stop MIDI must still stop the actual player.
+  $('#performPlay').onclick = state.playing
+    ? () => performanceTransport.run('Stopping MIDI', transportStopMidi)
+    : () => { const files = midi.netHost ? midi.files : midi.local; const f = files.find(x => x.name === score.file) || files[0];
+        if (f) transportMidiFile(f); else { performanceTransport.message = 'Upload or select a MIDI file first'; transportPaint(); } };
+  $('#performPlay').disabled = busy || !(midi.netHost || midi.out);
+  $('#performStop').disabled = busy || !(midi.netHost || midi.out || link.connected);
+  $('#performPanic').disabled = busy || !link.connected;
+  $('#performResume').disabled = busy || !link.connected;
+  $('#performResume').hidden = !(link.connected && dev.status && dev.status.output_muted === true);
+  $('#performPanic').classList.toggle('active', !$('#performResume').hidden);
+  $('#performPosition').textContent = state.playing ? `${state.file || 'MIDI'} · ${(state.position_s || 0).toFixed(1)} s` : 'MIDI stopped';
+  $('#performMessage').textContent = performanceTransport.message;
+}
+
 function init() {
   $ = s => document.querySelector(s);
   store.load();
@@ -10303,6 +10404,7 @@ function init() {
   songBuildSection();                            // song sessions (NEW)
   sysBuildSection();
   diagBuildSection();                           // GLS-DIAG: the "no sound?" panel
+  transportInit();
   // Served by the companion Pi: a plain link to its setup page, right next to the connection pill
   if (/^https?:$/.test(location.protocol)) {
     const a = document.createElement('a');

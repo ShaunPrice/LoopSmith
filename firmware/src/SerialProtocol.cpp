@@ -145,7 +145,7 @@ void SerialProtocol::emitStatus()
     char buf[1280];
     snprintf(buf, sizeof(buf),
         "#STATUS {\"cpu\":%.1f,\"cpu_max\":%.1f,\"mem\":%d,\"mem_max\":%d,"
-        "\"peak_in\":%.3f,\"peak_out\":%.3f,"
+        "\"peak_in\":%.3f,\"peak_out\":%.3f,\"output_muted\":%s,"
         "\"loop\":{\"state\":\"%s\",\"len_s\":%.2f,\"pos_s\":%.2f,\"can_undo\":%s,\"seconds_max\":%.1f},"
         "\"sync\":%s,"
         "\"preset\":{\"index\":%d,\"count\":%d,\"name\":\"%s\",\"title\":\"%s\"},"
@@ -153,7 +153,7 @@ void SerialProtocol::emitStatus()
         "\"rev\":%lu,\"fp\":\"%s\",\"tone\":%s,\"midi\":{\"rx\":%lu,\"trig\":%lu,\"voices\":%d}}",
         AudioProcessorUsage(), AudioProcessorUsageMax(),
         AudioMemoryUsage(), AudioMemoryUsageMax(),
-        pedal_->patch.peakIn(), pedal_->patch.peakOut(),
+        pedal_->patch.peakIn(), pedal_->patch.peakOut(), pedal_->patch.outputMuted() ? "true" : "false",
         lp.stateName(), lp.lengthSeconds(), lp.positionSeconds(),
         lp.canUndo() ? "true" : "false", lp.maxSeconds(),
         sync,
@@ -583,14 +583,21 @@ void SerialProtocol::handleLine(char *line)
         return;
     }
 
+    if (cmd == "panic" || cmd == "resume") {
+        pedal_->patch.setOutputMuted(cmd == "panic");
+        if (cmd == "panic") { pedal_->patch.allNotesOff(); pedal_->patch.looper.halt(); }
+        Serial.println("#OK output");
+        return;
+    }
     if (cmd == "looper") {
         String a = argc > 1 ? argv[1] : "";
         AudioEffectLooper &lp = pedal_->patch.looper;
         if      (a == "tap")   lp.tapLoop();
         else if (a == "stop")  lp.tapStop();
+        else if (a == "halt")  lp.halt();
         else if (a == "undo")  lp.undo();
         else if (a == "clear") lp.clearLoop();
-        else { Serial.println("#ERR looper tap|stop|undo|clear"); return; }
+        else { Serial.println("#ERR looper tap|stop|halt|undo|clear"); return; }
         Serial.println("#OK looper");
         return;
     }

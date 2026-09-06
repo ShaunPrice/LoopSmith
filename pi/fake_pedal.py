@@ -112,6 +112,7 @@ class FakePedal:
         self.tone_until = 0.0                 # time.time() deadline, 0 = off
         self.midi_rx = 0                      # note on/off received
         self.midi_trig = 0                    # voices actually triggered
+        self.output_muted = False
 
     # ----------------------------------------------------------- helpers
     def names(self):
@@ -140,7 +141,8 @@ class FakePedal:
         self.peak = 0.15 + 0.6 * abs(((time.time() * 1.7) % 2.0) - 1.0)
         return json.dumps({
             "cpu": round(6.0 + 3.0 * self.peak, 1), "cpu_max": 19.8, "mem": 14, "mem_max": 22,
-            "peak_in": round(self.peak, 3), "peak_out": round(self.peak * 0.9, 3),
+            "peak_in": round(self.peak, 3), "peak_out": 0 if self.output_muted else round(self.peak * 0.9, 3),
+            "output_muted": self.output_muted,
             "loop": {"state": self.loop_state, "len_s": round(self.loop_len, 2),
                      "pos_s": round(pos, 2), "can_undo": self.can_undo, "seconds_max": 95.0},
             "preset": {"index": self.index, "count": len(self.presets),
@@ -166,6 +168,9 @@ class FakePedal:
                 self.loop_state, self.can_undo = "playing", True
             elif s == "stopped":
                 self.loop_state, self.loop_t0 = "playing", time.time()
+        elif cmd == "halt":
+            if s not in ("empty", "stopped"):
+                self.looper("stop")
         elif cmd == "stop":
             if s == "recording":
                 self.loop_len = max(0.1, time.time() - self.loop_t0)
@@ -224,6 +229,10 @@ class FakePedal:
         say = lambda s: out((s + "\n").encode())
         if cmd == "ping":
             say(f'#PONG {{"fw":"{FW}","proto":1,"psram_mb":16,"sd":true,"flash":true}}')
+        elif cmd in ("panic", "resume"):
+            self.output_muted = cmd == "panic"
+            if self.output_muted: self.looper("halt")
+            say("#OK output")
         elif cmd == "status":
             say("#STATUS " + self.status_json())
         elif cmd == "monitor":
