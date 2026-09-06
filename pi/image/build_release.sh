@@ -26,6 +26,8 @@ cp "$HERE"/*.service "$HERE"/*.timer "$S/units/" 2>/dev/null || true
 sed -e "s/__USER__/looper/" -e "s|--editor /opt/looper/editor|--editor /opt/looper/editor --www /opt/looper/pi/www --storage /media/usb|" \
     "$REPO/pi/looper-bridge.service" > "$S/units/looper-bridge.service"
 cp "$HERE"/*.rules "$REPO"/pi/99-teensy-looper.rules "$S/udev/"
+cp "$HERE"/postinstall.sh "$S/"                      # transition hook: only the pre-2.7.0 updater runs it
+cp "$HERE"/50-looper.rules "$S/app/pi/"             # so the hook can find the rule after the app is in place
 cat > "$S/postinstall.sh" <<'PI'
 #!/bin/sh
 # runs as root inside the update, after the files are in place

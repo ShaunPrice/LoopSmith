@@ -7373,7 +7373,7 @@ function sessionValidate(pkg) {
 
 /* ---- building a session from the current state ---- */
 async function sessionBuild(sel) {
-  const pkg = { format: SONG_FORMAT, version: SONG_VERSION, app: 'GuitarLoopSynth Studio',
+  const pkg = { format: SONG_FORMAT, version: SONG_VERSION, app: 'LoopSmith Studio',
                 created: new Date().toISOString(), title: sel.title || 'Song',
                 presets: [], midiFiles: [], loops: [] };
   // the same decoded-payload bound the importer enforces, checked as we pack:

@@ -40,3 +40,7 @@ check, service/rule restoration, new-file removal, version commit ordering, inva
 Python rejection, unsafe archive rejection, and remote credential-loss handling.
 Tests use temporary directories and fake service callbacks; they do not reboot or
 modify a Pi. Real power-loss recovery is not claimed.
+
+## Upgrading from a release before 2.7.0
+
+The updater that shipped before 2.7.0 runs a bundle's `postinstall.sh` and copies every `*.rules` file into `/etc/udev/rules.d`. `pi/image/postinstall.sh` exists only for that first crossing: it moves the polkit rule (`50-looper.rules`) to `/etc/polkit-1/rules.d`, where `looper-rollback.service` needs it. The 2.7.0 updater installs the rule itself and never executes bundle hooks, so the file is inert afterwards.

@@ -80,6 +80,8 @@ repack_repo() {   # repack_repo <repo tarball> <out bundle>
     [ -f "$root/pi/image/$f" ] && cp "$root/pi/image/$f" "$stage/app/pi/"
   done
   for f in "$root"/pi/image/*.service "$root"/pi/image/*.timer; do [ -f "$f" ] && cp "$f" "$stage/units/"; done
+  [ -f "$root/pi/image/postinstall.sh" ] && cp "$root/pi/image/postinstall.sh" "$stage/"
+  [ -f "$root/pi/image/50-looper.rules" ] && cp "$root/pi/image/50-looper.rules" "$stage/app/pi/"
   sed -e "s/__USER__/looper/" -e "s|--editor /opt/looper/editor|--editor /opt/looper/editor --www /opt/looper/pi/www --storage /media/usb|" \
       "$root/pi/looper-bridge.service" > "$stage/units/looper-bridge.service" 2>/dev/null
   for f in "$root"/pi/image/*.rules "$root"/pi/99-teensy-looper.rules; do [ -f "$f" ] && cp "$f" "$stage/udev/"; done
