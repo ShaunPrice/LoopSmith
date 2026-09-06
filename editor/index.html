@@ -7356,7 +7356,8 @@ async function sessionBuild(sel) {
   for (const name of sel.midi) {
     const f = scoreFiles().find(x => x.name === name);
     if (!f) continue;
-    let bytes = f.bytes;
+    // careful: on bridge listings f.bytes is the SIZE; only local uploads hold the data
+    let bytes = f.bytes instanceof Uint8Array ? f.bytes : null;
     if (!bytes && midi.netHost) {
       const r = await fetch('/midi-files/' + encodeURIComponent(name));
       if (!r.ok) throw new Error(`could not read ${name} from the Pi`);
@@ -7421,6 +7422,13 @@ async function sessionApply(data, choose) {
   if (data.loops.some(f => choose.loops.has(f.name))) await refreshLoops();
   if (data.playback && choose.playback) {
     const p = data.playback;
+    // choose the file FIRST: scoreSelect clears the A/B passage on a change of file
+    if (typeof p.file === 'string') {
+      const target = choose.replace ? p.file : (choose.midi.has(p.file) ? dedupeName(p.file, existingMidi.filter(n => n !== p.file)) : p.file);
+      const have = scoreFiles().some(f => f.name === p.file) ? p.file : (scoreFiles().some(f => f.name === target) ? target : null);
+      if (have) { score.file = null; scoreSelect(have); }
+      else failed.push(`playback: "${p.file}" is not among the MIDI files here — pick it in the Score panel when it is`);
+    }
     if (p.speed !== undefined) scoreCtl.speed = p.speed;
     if (p.transpose !== undefined) scoreCtl.transpose = p.transpose;
     scoreCtl.mute = new Set(p.mute || []);
@@ -7431,12 +7439,6 @@ async function sessionApply(data, choose) {
     if (p.loop !== undefined) { midi.loop = !!p.loop; if ($('#midiLoopChk')) $('#midiLoopChk').checked = midi.loop; }
     if ($('#scoreSpeed')) $('#scoreSpeed').value = String(scoreCtl.speed);
     if ($('#scoreTrans')) $('#scoreTrans').value = String(scoreCtl.transpose);
-    if (typeof p.file === 'string') {
-      const target = choose.replace ? p.file : (choose.midi.has(p.file) ? dedupeName(p.file, existingMidi.filter(n => n !== p.file)) : p.file);
-      const have = scoreFiles().some(f => f.name === p.file) ? p.file : (scoreFiles().some(f => f.name === target) ? target : null);
-      if (have) { score.file = null; scoreSelect(have); }
-      else failed.push(`playback: "${p.file}" is not among the MIDI files here — pick it in the Score panel when it is`);
-    }
     scoreApplyCtl(); scorePaint();
     done.push('playback preferences');
   }
