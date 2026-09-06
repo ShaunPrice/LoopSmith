@@ -347,6 +347,8 @@ input[type=range]::-moz-range-thumb{
 .lamp.playing{background:var(--teal);box-shadow:0 0 12px var(--teal)}
 .lamp.overdubbing{background:var(--accent);box-shadow:0 0 14px var(--accent);animation:pulse 1s ease-in-out infinite}
 .lamp.stopped{background:#8a90a0}
+.lamp.armed{background:var(--red);box-shadow:0 0 8px var(--red);animation:pulse 1.6s ease-in-out infinite}
+.lamp.countin{background:var(--red);box-shadow:0 0 14px var(--red);animation:pulse .5s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.45}}
 #loopRingWrap{position:relative;width:64px;height:64px;flex:0 0 auto}
 #loopRingWrap svg{transform:rotate(-90deg)}
@@ -355,6 +357,12 @@ input[type=range]::-moz-range-thumb{
 #loopMeta{flex:1;min-width:0}
 #loopState{font-size:12px;font-weight:700;letter-spacing:.5px;text-transform:uppercase}
 #loopTime{font-family:var(--mono);font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+#syncBox{margin-top:10px;border-top:1px solid #262b36;padding-top:8px}
+.syncrow{display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap}
+.syncrow label{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--muted);font-weight:700;letter-spacing:.4px}
+.syncrow select,.syncrow input{background:var(--card);color:var(--ink);border:1px solid #262b36;border-radius:6px;padding:3px 5px;font-size:11px;font-family:inherit}
+#syBpm{width:52px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+#syncStat{font-size:11px;color:var(--muted);margin-top:2px}
 #devPresetName{font-family:var(--mono);font-size:11.5px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .volrow{display:flex;align-items:center;gap:8px}
 .volrow .ro{flex:0 0 40px}
@@ -714,6 +722,30 @@ path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
           <div id="loopState">—</div>
           <div id="loopTime">0.0 / 0.0 s</div>
         </div>
+      </div>
+      <div id="syncBox">
+        <div class="syncrow">
+          <label>SYNC <select id="syMode" disabled aria-label="Quantise mode">
+            <option value="off">Off</option><option value="beat">Beat</option><option value="bar">Bar</option>
+          </select></label>
+          <label>CLOCK <select id="sySrc" disabled aria-label="Tempo source">
+            <option value="internal">Internal</option><option value="midi">MIDI in</option>
+          </select></label>
+          <label>BPM <input id="syBpm" type="number" min="30" max="300" step="1" value="120" disabled aria-label="Tempo"></label>
+        </div>
+        <div class="syncrow">
+          <label>COUNT-IN <select id="syCi" disabled aria-label="Count-in bars">
+            <option value="0">Off</option><option value="1">1 bar</option><option value="2">2 bars</option><option value="4">4 bars</option>
+          </select></label>
+          <label>LENGTH <select id="syBars" disabled aria-label="Recording length in bars">
+            <option value="0">Free</option><option value="1">1 bar</option><option value="2">2 bars</option>
+            <option value="4">4 bars</option><option value="8">8 bars</option><option value="16">16 bars</option><option value="32">32 bars</option>
+          </select></label>
+          <label>CLICK <select id="syMet" disabled aria-label="Metronome">
+            <option value="off">Off</option><option value="rec">Record</option><option value="on">On</option>
+          </select></label>
+        </div>
+        <div id="syncStat">Connect to configure musical sync.</div>
       </div>
     </div>
 
@@ -5235,6 +5267,7 @@ const dev = {
   loop: { state: 'empty', len_s: 0, pos_s: 0, can_undo: false },
   switches: null,              // last #SWITCHES payload { switches:[…], actions:[…] }
   loops: null,                 // last #LOOPS payload { sd, loops:[…], seconds_max }
+  sync: null,                  // last sync state { mode, src, bpm, clk, phase, beat, countin, bars, met }
 };
 
 function linkWrite(bytes) {
@@ -7195,10 +7228,11 @@ async function linkUp(msg) {
   }
   try { await refreshDeviceList(); } catch (e) { consoleLog('err', 'List presets: ' + e.message); }
   try { await sendCmd('monitor on'); } catch (e) { consoleLog('err', 'Monitor: ' + e.message); }
-  // Footswitch map + loop files (older firmware answers #ERR — settle() logs it).
+  // Footswitch map + loop files + sync (older firmware answers #ERR — settle() logs it).
   try { await sendCmd('switches'); } catch (e) {}
   try { await sendCmd('loops'); } catch (e) {}
   diagOnConnect();                                  // GLS-DIAG: confirm what is running
+  try { await sendCmd('sync'); } catch (e) {}
 }
 
 async function linkDisconnect(silent) {
@@ -7392,6 +7426,12 @@ function handleLine(line) {
       if (link.active && /^loops\b/.test(link.active.line)) settle(null, { json: j });
       break;
     }
+    case '#SYNC': {
+      const j = tryJson(rest);
+      if (j) { dev.sync = Object.assign(dev.sync || {}, j); renderSync(); }
+      if (link.active && /^sync\b/.test(link.active.line)) settle(null, { json: j });
+      break;
+    }
     case '#OK': {
       // Piggy-back state off the acknowledgement text (e.g. "#OK load 02_x.txt",
       // "#OK bypass on", "#OK vol 0.70").
@@ -7518,6 +7558,7 @@ function applyStatus(st) {
   if (typeof st.peak_in === 'number') dev.vu.in.tgt = clamp(st.peak_in, 0, 1);
   if (typeof st.peak_out === 'number') dev.vu.out.tgt = clamp(st.peak_out, 0, 1);
   if (st.loop) dev.loop = st.loop;
+  if (st.sync) { dev.sync = Object.assign(dev.sync || {}, st.sync); renderSync(); }
   if (st.preset) { dev.presetName = st.preset.title || st.preset.name || '-'; renderDevPresetName(); }
   if (typeof st.bypass === 'boolean') { dev.bypass = st.bypass; renderBypass(); }
   if (typeof st.volume === 'number') { dev.volume = st.volume; renderVolume(false); }
@@ -8548,13 +8589,15 @@ function updateConnUi() {
   if (link.connected) $('#netRow').style.display = 'none';
   const en = link.connected;
   for (const id of ['tLoop', 'tStop', 'tUndo', 'tClear', 'tBypass', 'applyBtn', 'autoApplyChk',
-                    'dpPrev', 'dpNext', 'dpRefresh', 'dpPush', 'volSlider'])
+                    'dpPrev', 'dpNext', 'dpRefresh', 'dpPush', 'volSlider',
+                    'syMode', 'sySrc', 'syBpm', 'syCi', 'syBars', 'syMet'])
     $('#' + id).disabled = !en;
   if (!en) {
     $('#loopLamp').className = 'lamp';
     $('#loopState').textContent = '-';
     $('#devPresetName').textContent = '-';
     dev.switches = null; dev.loops = null;
+    dev.sync = null; renderSync();
     releaseAllNotes();
     progressDone();
   }
@@ -8583,7 +8626,7 @@ function renderLooper() {
   const L = dev.loop || {};
   const lamp = $('#loopLamp');
   lamp.className = 'lamp ' + (L.state && L.state !== 'empty' ? L.state : '');
-  $('#loopState').textContent = L.state || '-';
+  $('#loopState').textContent = L.state === 'countin' ? 'count-in' : (L.state || '-');
   $('#loopTime').textContent = (L.pos_s || 0).toFixed(1) + ' / ' + (L.len_s || 0).toFixed(1) + ' s';
   const C = 163.36;
   const frac = (L.len_s > 0) ? clamp((L.pos_s || 0) / L.len_s, 0, 1) : 0;
@@ -8592,6 +8635,36 @@ function renderLooper() {
   ring.style.stroke = L.state === 'recording' ? 'var(--red)' : (L.state === 'overdubbing' ? 'var(--accent)' : 'var(--teal)');
   $('#tUndo').disabled = !link.connected || !L.can_undo;
   syncEdSend();
+}
+/** Musical sync panel: mirror the pedal's settings (without fighting a control
+ *  the user is holding) and narrate what the timing engine is doing. */
+function renderSync() {
+  const s = dev.sync;
+  if (!s) {
+    $('#syncStat').textContent = link.connected
+      ? 'No sync info — firmware 2.2.x or older on the pedal.'
+      : 'Connect to configure musical sync.';
+    return;
+  }
+  const put = (id, v) => { const el = $('#' + id); if (document.activeElement !== el) el.value = String(v); };
+  put('syMode', s.mode || 'off');
+  put('sySrc', s.src || 'internal');
+  if (typeof s.bpm === 'number' && document.activeElement !== $('#syBpm')) $('#syBpm').value = Math.round(s.bpm);
+  if (s.countin != null) put('syCi', s.countin);
+  if (s.bars != null) put('syBars', s.bars);
+  put('syMet', s.met || 'rec');
+  let txt;
+  if (!s.mode || s.mode === 'off') {
+    txt = 'Sync off — taps record immediately.';
+  } else {
+    txt = `Quantise to ${s.mode} · ${Math.round(s.bpm || 0)} BPM`;
+    if (s.src === 'midi') txt += ` · MIDI clock ${s.clk || 'idle'}`;
+    if (s.phase === 'countin') txt += ` · count-in, beat ${s.beat}`;
+    else if (s.phase === 'armed') txt += ` · armed — starts on the next ${s.mode}`;
+    else if (s.phase === 'recording' && s.bars > 0) txt += ` · recording ${s.bars} bar${s.bars > 1 ? 's' : ''}`;
+    else if (s.phase === 'closing') txt += ` · closing on the next ${s.mode}`;
+  }
+  $('#syncStat').textContent = txt;
 }
 function renderDevPresetName() { $('#devPresetName').textContent = dev.presetName || '-'; }
 function renderBypass() {
@@ -9388,6 +9461,19 @@ function init() {
       if (st && st.bridge === 'looper' && !link.connected) netConnect(location.host);
     }).catch(() => {});
   }
+  // Musical sync panel — each control maps to one `sync …` command; the pedal
+  // answers with #SYNC, which renderSync() mirrors back.
+  const syncSend = (args) => sendCmd('sync ' + args).catch(() => {});
+  $('#syMode').addEventListener('change', e => syncSend('mode ' + e.target.value));
+  $('#sySrc').addEventListener('change', e => syncSend('source ' + e.target.value));
+  $('#syBpm').addEventListener('change', e => {
+    const v = Math.max(30, Math.min(300, Math.round(+e.target.value) || 120));
+    e.target.value = v;
+    syncSend('bpm ' + v);
+  });
+  $('#syCi').addEventListener('change', e => syncSend('countin ' + e.target.value));
+  $('#syBars').addEventListener('change', e => syncSend('bars ' + e.target.value));
+  $('#syMet').addEventListener('change', e => syncSend('met ' + e.target.value));
   $('#tLoop').addEventListener('click', () => sendCmd('looper tap').catch(() => {}));
   $('#tStop').addEventListener('click', () => sendCmd('looper stop').catch(() => {}));
   $('#tUndo').addEventListener('click', () => sendCmd('looper undo').catch(() => {}));
