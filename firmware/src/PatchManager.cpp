@@ -22,6 +22,12 @@ void PatchManager::begin()
     outMix.gain(1, 1.0f);     // loop playback
     outMix.gain(2, 0.0f);
     outMix.gain(3, 0.0f);
+    monitorMix_.gain(0, 1.0f);          // everything the pedal makes
+    monitorMix_.gain(1, 1.0f);          // diagnostic tone (level set on the tone itself)
+    monitorMix_.gain(2, 0.0f);
+    monitorMix_.gain(3, 0.0f);
+    testTone_.amplitude(0.0f);          // silent until toneStart()
+    testTone_.frequency(TONE_FREQ_DEFAULT);
     setBypass(true);          // dry until a preset loads
 
     // skeleton wiring
@@ -37,13 +43,19 @@ void PatchManager::begin()
     C(bypassMix, 0, looper, 0);
     C(bypassMix, 0, outMix, 0);
     C(looper, 0, outMix, 1);
-    C(outMix, 0, i2sOut, 0);
-    C(outMix, 0, i2sOut, 1);
+    // monitorMix_ sits between outMix and the jacks so the diagnostic tone can
+    // be added without touching the preset graph (outMix has no free input in
+    // USB-audio builds). peakOut_ taps it too, so the tone shows on the OUT
+    // meter — measured evidence the pedal is producing signal.
+    C(outMix, 0, monitorMix_, 0);
+    C(testTone_, 0, monitorMix_, 1);
+    C(monitorMix_, 0, i2sOut, 0);
+    C(monitorMix_, 0, i2sOut, 1);
     C(preGain, 0, peakIn_, 0);
-    C(outMix, 0, peakOut_, 0);
+    C(monitorMix_, 0, peakOut_, 0);
 #if defined(AUDIO_INTERFACE)
-    C(outMix, 0, usbOut, 0);          // what the amp hears also goes to USB (L+R)
-    C(outMix, 0, usbOut, 1);
+    C(outMix, 0, usbOut, 0);          // what the amp hears also goes to USB (L+R);
+    C(outMix, 0, usbOut, 1);          // tapped before monitorMix_ so the test tone stays out of recordings
     C(usbIn, 0, outMix, 2);           // computer audio into the output mix
     C(usbIn, 1, outMix, 3);
     outMix.gain(2, 0.5f);             // L+R summed to mono at unity overall
@@ -125,6 +137,35 @@ float PatchManager::peakOut()
 }
 
 // --------------------------------------------------------------------------
+// Diagnostic test tone (see config.h TONE_* for the clamps)
+// --------------------------------------------------------------------------
+
+bool PatchManager::toneStart(uint32_t ms, float freq, float level)
+{
+    if (ms < TONE_MS_MIN) ms = TONE_MS_MIN;
+    if (ms > TONE_MS_MAX) ms = TONE_MS_MAX;
+    if (!(freq >= TONE_FREQ_MIN && freq <= TONE_FREQ_MAX)) freq = TONE_FREQ_DEFAULT;
+    if (!(level > 0.0f)) level = TONE_LEVEL_DEFAULT;
+    if (level > TONE_LEVEL_MAX) level = TONE_LEVEL_MAX;
+    testTone_.frequency(freq);
+    testTone_.amplitude(level);
+    toneOn_ = true;
+    toneOffAt_ = millis() + ms;
+    return true;
+}
+
+void PatchManager::toneStop()
+{
+    testTone_.amplitude(0.0f);
+    toneOn_ = false;
+}
+
+void PatchManager::pollTone()
+{
+    if (toneOn_ && (int32_t)(millis() - toneOffAt_) >= 0) toneStop();
+}
+
+// --------------------------------------------------------------------------
 // MIDI voices
 // --------------------------------------------------------------------------
 
@@ -197,6 +238,7 @@ void PatchManager::applyExtras()
 
 void PatchManager::triggerUnit(VoiceUnit &u, float freq, float vel, int note)
 {
+    noteTriggers_++;       // a voice really fired — diagnostics evidence
     for (auto &m : u.members) {
         const float f   = freq * m.x.ratio;
         const float amp = m.x.base * (1.0f - m.x.velSens + m.x.velSens * vel);   // velocity-scaled level
@@ -575,6 +617,7 @@ bool PatchManager::loadPatch(const char *text, size_t len, String &err, String &
 
     title_ = doc.title;
     setBypass(!wetPath);   // engage the chain if it reaches fxout, else stay dry
+    patchRev_++;           // a new patch is confirmed running (see patchRev())
     return true;
 }
 

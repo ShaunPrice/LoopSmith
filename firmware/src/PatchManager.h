@@ -67,6 +67,22 @@ public:
     void  noteOff(uint8_t channel, uint8_t note);
     int   voiceCount() const { return (int)voices_.size(); }
 
+    // Diagnostics evidence (see docs/PROTOCOL.md "#STATUS payload"):
+    // patchRev() counts successful patch loads/applies so a UI can tell "the
+    // running patch changed" apart from "the same patch is still running";
+    // noteTriggers() counts voices actually triggered — evidence a note made
+    // it through the allocator, not merely that MIDI was transmitted.
+    uint32_t patchRev() const { return patchRev_; }
+    uint32_t noteTriggers() const { return noteTriggers_; }
+
+    // Diagnostic test tone: a quiet sine mixed in AFTER the preset graph and
+    // the USB recording tap, so the running patch, the loop and recordings are
+    // untouched and the tone stops by itself (pollTone(), called every loop).
+    bool  toneStart(uint32_t ms, float freq, float level);
+    void  toneStop();
+    bool  toneActive() const { return toneOn_; }
+    void  pollTone();
+
     AudioEffectLooper looper;           // public: the UI drives it directly
 
 private:
@@ -119,6 +135,8 @@ private:
     AudioMixer4          fxOut;         // PatchScript endpoint "fxout"
     AudioMixer4          bypassMix;     // 0: wet chain, 1: dry
     AudioMixer4          outMix;        // 0: live, 1: looper
+    AudioMixer4          monitorMix_;   // 0: outMix (everything), 1: test tone
+    AudioSynthWaveformSine testTone_;   // diagnostic tone (amplitude 0 when idle)
     AudioOutputI2S       i2sOut;
     AudioAnalyzePeak     peakIn_;
     AudioAnalyzePeak     peakOut_;
@@ -143,4 +161,8 @@ private:
     bool   bypass_ = true;              // dry until a patch loads
     float  volume_ = DEFAULT_VOLUME;
     float  lastPeakIn_ = 0, lastPeakOut_ = 0;
+    uint32_t patchRev_ = 0;             // bumped on every successful loadPatch
+    uint32_t noteTriggers_ = 0;         // bumped whenever a voice unit fires
+    bool     toneOn_ = false;
+    uint32_t toneOffAt_ = 0;            // millis() deadline for the auto-stop
 };

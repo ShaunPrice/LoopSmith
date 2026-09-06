@@ -33,6 +33,9 @@ Three things make it different from a shop-bought looper.
 
 ## What it does
 
+- **No-sound diagnostics** — confirmed running-preset status, measured digital audio
+  levels, MIDI receive/trigger evidence, a short test tone and a speaker/cable checklist.
+
 - **Looper** — up to 95 seconds, mono, unlimited overdubs with one-level undo, musical stop that
   finishes the phrase, and hold-to-erase. Loops are files: save them to the card, trim and fade
   them in the browser, download them for a DAW, or upload audio back.

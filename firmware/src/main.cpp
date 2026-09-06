@@ -32,6 +32,7 @@ static void pollMidi()
         uint8_t type = usbMIDI.getType();
         if (type == usbMIDI.NoteOn || type == usbMIDI.NoteOff) {
             uint8_t ch = usbMIDI.getChannel(), n = usbMIDI.getData1(), v = usbMIDI.getData2();
+            pedal.midiRxNotes++;
             if (type == usbMIDI.NoteOn && v > 0) pedal.patch.noteOn(ch, n, v / 127.0f);
             else pedal.patch.noteOff(ch, n);
         } else if (type == usbMIDI.ProgramChange) {

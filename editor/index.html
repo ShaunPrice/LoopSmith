@@ -496,6 +496,19 @@ input[type=range]::-moz-range-thumb{
 .midi-cov.warn{color:var(--warn,#e0a030);cursor:pointer;border-radius:4px}
 .midi-cov.warn.pinned{background:rgba(224,160,48,.18)}
 .midi-cov-note{font-size:11px;line-height:1.35;color:var(--warn,#e0a030);margin:-2px 0 6px 2px}
+/* GLS-DIAG: coverage against the pedal can also be honestly unknown */
+.midi-cov.unknown{color:var(--muted);cursor:pointer;border-radius:4px}
+.midi-cov.unknown.pinned{background:rgba(138,144,160,.18)}
+.midi-cov-note.info{color:var(--muted)}
+/* GLS-DIAG: diagnostics panel findings */
+.diag-item{font-size:11px;line-height:1.45;margin-top:4px;padding-left:13px;position:relative}
+.diag-item::before{content:'\2022';position:absolute;left:2px}
+.diag-item.ok{color:var(--teal)}
+.diag-item.warn{color:var(--warn,#e0a030)}
+.diag-item.note{color:var(--muted)}
+.diag-sync{font-size:11px;margin-top:4px}
+.diag-sync.differs{color:var(--warn,#e0a030)}
+.diag-sync.insync{color:var(--teal)}
 .chan-row{display:flex;align-items:center;gap:8px;margin:4px 0}
 .chan-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
 .chan-row .midi-sel{width:120px}
@@ -5445,31 +5458,17 @@ function midiUsage(events) {
   return use;
 }
 function presetBindings(preset) {
-  const any = new Set(), notes = new Map();               // channels bound wholesale / per note
-  if (!preset) return { any, notes };
-  let text; try { text = generateText(preset); } catch (e) { return { any, notes }; }
-  const re = /\.midi\s*\(\s*(\d+)\s*(?:,[^,)]*(?:,\s*(\d+)\s*)?)?\)/g;
-  let m;
-  while ((m = re.exec(text))) {
-    const ch = +m[1];
-    if (m[2] === undefined) any.add(ch);
-    else { if (!notes.has(ch)) notes.set(ch, new Set()); notes.get(ch).add(+m[2]); }
-  }
-  return { any, notes };
+  if (!preset) return { any: new Set(), notes: new Map() };
+  let text; try { text = generateText(preset); } catch (e) { return { any: new Set(), notes: new Map() }; }
+  return diagBindingsFromText(text);          // GLS-DIAG shares the .midi() parser
 }
-/** null when the file is unparsed; otherwise the notes the preset cannot play. */
+/** null when the file is unparsed; otherwise the notes the Studio draft cannot play. */
 function midiCoverage(file) {
   if (!file || !file.uses) return null;
-  const b = presetBindings(current()), gaps = [];
-  for (const [ch, notes] of file.uses) {
-    if (b.any.has(ch)) continue;                          // melodic voice takes any note
-    const have = b.notes.get(ch);
-    const missing = [...notes].filter(n => !have || !have.has(n)).sort((x, y) => x - y);
-    if (missing.length) gaps.push({ ch, missing, partial: !!have });
-  }
+  const gaps = diagCoverageGaps(file.uses, presetBindings(current()));
   return { ok: !gaps.length, gaps };
 }
-function midiCoverageNote(cov) {
+function midiCoverageNote(cov, subject) {
   if (!cov || cov.ok) return '';
   const parts = cov.gaps.map(g => {
     const shown = g.missing.slice(0, 5).map(n => n + ' ' + noteName(n)).join(', ');
@@ -5477,7 +5476,7 @@ function midiCoverageNote(cov) {
   });
   const drums = cov.gaps.some(g => g.ch === 10);
   const full = drums && dev.presets.some(n => /fullkit/i.test(n));
-  return `Nothing in this preset answers ${parts.join(' · ')} — those notes will be silent. `
+  return `Nothing in ${subject || 'this preset'} answers ${parts.join(' · ')} — those notes will be silent. `
        + (full ? 'Load 11_fullkit.txt for the whole drum map, or add'
                : 'Add')
        + ' an instrument that covers them, then push the preset.';
@@ -5506,6 +5505,496 @@ function midiLocalPlay(file, loop) {
   midiPaint();
 }
 function midiLocalStop() { if (midi.player) { midi.player.stop(); midi.player = null; midiPaint(); } }
+
+/* ==========================================================================
+   GLS-DIAG BEGIN — diagnostics + confirmed running preset (extractable module)
+   ----------------------------------------------------------------------------
+   Everything the "no sound?" panel and the device-truth MIDI coverage marks
+   need, kept in one section so it can later be lifted into its own file.
+   The pure logic lives in createDiagnostics(deps) and the diag* helpers below
+   it, with no DOM or globals, so Node can unit-test it (editor/tests/); the
+   browser wiring and the panel renderer sit at the end behind a
+   `typeof document` guard.
+
+   The honesty rules this module enforces:
+   - "Running on pedal" is only ever CONFIRMED content: the exact bytes of a
+     successful `apply`, or a preset file read back from the device after the
+     device said it loaded it. The Studio draft never stands in for hardware.
+   - Confirmation is invalidated on disconnect/unplug, on an external preset
+     change (#EVT), and — on firmware 2.2.2+ — whenever the reported patch
+     revision ("rev") no longer matches the one we confirmed.
+   - MIDI transmit counts are never presented as proof a note sounded; voice
+     triggers are only claimed when the firmware reports its trigger counter.
+   - The test tone is generated by the pedal itself and stops itself there;
+     old firmware without the `tone` command is reported as such, honestly.
+   ========================================================================== */
+
+/** 32-bit FNV-1a of a patch text — cheap fingerprint for "same content?". */
+function diagFingerprint(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+/** obj.midi(ch[, group[, note]]) bindings straight out of PatchScript text —
+ *  works for generated chains and hand-written custom routing alike (the text
+ *  is used verbatim; chain-meta and custom routing metadata are untouched). */
+function diagBindingsFromText(text) {
+  const any = new Set(), notes = new Map();               // channels bound wholesale / per note
+  const re = /\.midi\s*\(\s*(\d+)\s*(?:,[^,)]*(?:,\s*(\d+)\s*)?)?\)/g;
+  let m;
+  while ((m = re.exec(text || ''))) {
+    const ch = +m[1];
+    if (m[2] === undefined) any.add(ch);
+    else { if (!notes.has(ch)) notes.set(ch, new Set()); notes.get(ch).add(+m[2]); }
+  }
+  return { any, notes };
+}
+
+/** Which of a file's notes (Map channel -> Set of notes) the bindings miss. */
+function diagCoverageGaps(uses, b) {
+  const gaps = [];
+  for (const [ch, notes] of uses) {
+    if (b.any.has(ch)) continue;                          // melodic voice takes any note
+    const have = b.notes.get(ch);
+    const missing = [...notes].filter(n => !have || !have.has(n)).sort((x, y) => x - y);
+    if (missing.length) gaps.push({ ch, missing, partial: !!have });
+  }
+  return gaps;
+}
+
+/** "// name: Title" out of a patch text (same convention the firmware uses). */
+function diagTitleFromText(text) {
+  const m = /\/\/\s*name:\s*(.+)/.exec(text || '');
+  return m ? m[1].trim() : '';
+}
+
+/** "rev=N" out of an #OK acknowledgement (firmware 2.2.2+); null when absent. */
+function diagRevFromAck(txt) {
+  const m = /(?:^|\s)rev=(\d+)\b/.exec(txt || '');
+  return m ? +m[1] : null;
+}
+
+/**
+ * The diagnostics state machine. deps:
+ *   now()                     — ms clock
+ *   setTimeout(fn, ms) / clearTimeout(id)
+ *   send(line, opts)          — device command, resolves like sendCmd
+ *   getPresetText(name)       — read a preset file back from the device
+ *   onChange()                — notify the UI (may be null)
+ */
+function createDiagnostics(deps) {
+  const d = {
+    connected: false,
+    running: null,             // { name, title, fingerprint, bindings, source, rev, at } — CONFIRMED only
+    runningUnknownWhy: 'not connected',
+    lastApply: null,           // { ok, at, error }
+    tone: { supported: null, active: false, until: 0, timer: null, lastError: null },
+    status: null,              // last raw #STATUS payload
+    counters: null,            // { rx, trig, voices } when the firmware reports them
+    lastRxAt: 0, lastTrigAt: 0,
+    hasRev: false,             // firmware reports a patch revision
+    _confirmSeq: 0, _confirmTimer: null,
+  };
+  const changed = () => { if (deps.onChange) deps.onChange(); };
+  const invalidate = why => { d.running = null; d.runningUnknownWhy = why; changed(); };
+
+  d.onConnect = () => {
+    d.connected = true;
+    d.tone.supported = null; d.tone.active = false; d.tone.lastError = null;
+    d.status = null; d.counters = null; d.hasRev = false; d.lastApply = null;
+    invalidate('nothing confirmed since connecting');
+  };
+
+  d.onDisconnect = why => {
+    d.connected = false;
+    d._confirmSeq++;                       // a confirm still in flight must not land
+    if (d._confirmTimer) { deps.clearTimeout(d._confirmTimer); d._confirmTimer = null; }
+    if (d.tone.timer) { deps.clearTimeout(d.tone.timer); d.tone.timer = null; }
+    d.tone.active = false;                 // the firmware stops its own tone
+    invalidate(why || 'disconnected');
+  };
+
+  d.onStatus = st => {
+    d.status = st;
+    if (typeof st.rev === 'number') {
+      d.hasRev = true;
+      if (d.running) {
+        if (d.running.rev == null) d.running.rev = st.rev;         // adopt the first rev seen after confirming
+        else if (st.rev !== d.running.rev) invalidate('the patch changed on the pedal');
+      }
+    }
+    if (st.midi && typeof st.midi.rx === 'number') {
+      const prev = d.counters;
+      if (prev) {
+        if (st.midi.rx > prev.rx) d.lastRxAt = deps.now();
+        if (st.midi.trig > prev.trig) d.lastTrigAt = deps.now();
+      }
+      d.counters = st.midi;
+    }
+    if (typeof st.tone === 'boolean') {
+      if (d.tone.supported === null) d.tone.supported = true;
+      if (st.tone) d.tone.active = true;
+      // a "false" only clears the tone once its own deadline has passed — a
+      // status emitted just before our tone started also says false
+      else if (d.tone.active && deps.now() >= d.tone.until) d.tone.active = false;
+    }
+    changed();
+  };
+
+  d.onEvent = ev => {
+    if (typeof ev.tone === 'boolean') {
+      d.tone.supported = true;
+      d.tone.active = ev.tone;
+      if (!ev.tone && d.tone.timer) { deps.clearTimeout(d.tone.timer); d.tone.timer = null; }
+      changed();
+    }
+    // an external preset change (footswitch, MIDI program change): the new
+    // identity is known, the content is not — re-confirm by reading it back.
+    // (an empty name is the firmware noting a live-applied patch — not a change)
+    if (typeof ev.preset === 'string' && ev.preset) {
+      if (!d.running || d.running.name !== ev.preset || d.running.source === 'apply') {
+        invalidate('the pedal switched presets');
+        d.confirmByName(ev.preset);
+      }
+    }
+  };
+
+  /** A live `apply` settled. On success the running patch is exactly the text
+   *  we sent; on failure the firmware keeps the previous graph, so the previous
+   *  confirmation (if any) remains valid. */
+  d.onApplyResult = (ok, text, ackOrErr) => {
+    d.lastApply = { ok, at: deps.now(), error: ok ? null : String(ackOrErr || 'apply failed') };
+    if (ok) {
+      d._confirmSeq++;                     // outrank any confirm-by-name in flight
+      d.running = {
+        name: null, title: diagTitleFromText(text), fingerprint: diagFingerprint(text),
+        bindings: diagBindingsFromText(text), source: 'apply',
+        rev: diagRevFromAck(ackOrErr), at: deps.now(),
+      };
+      d.runningUnknownWhy = null;
+    }
+    changed();
+  };
+
+  /** The device acknowledged loading a stored preset (our command or the ack
+   *  of next/prev). Content still has to be read back to be confirmed. */
+  d.onDeviceLoad = (name, ackText) => {
+    invalidate('confirming ' + name + '…');
+    d.confirmByName(name, diagRevFromAck(ackText));
+  };
+
+  /** Read `name` back from the device and, if nothing newer superseded the
+   *  request, record it as the confirmed running patch. Debounced so rapid
+   *  next/next/next fetches once, for the final preset. */
+  d.confirmByName = (name, rev) => {
+    if (!name || !d.connected) return;
+    const seq = ++d._confirmSeq;
+    if (d._confirmTimer) deps.clearTimeout(d._confirmTimer);
+    d._confirmTimer = deps.setTimeout(() => {
+      d._confirmTimer = null;
+      Promise.resolve(deps.getPresetText(name)).then(text => {
+        if (seq !== d._confirmSeq || typeof text !== 'string') return;
+        d.running = {
+          name, title: diagTitleFromText(text) || name, fingerprint: diagFingerprint(text),
+          bindings: diagBindingsFromText(text), source: 'load',
+          rev: rev != null ? rev : null, at: deps.now(),
+        };
+        d.runningUnknownWhy = null;
+        changed();
+      }).catch(e => {
+        if (seq !== d._confirmSeq) return;
+        d.runningUnknownWhy = 'could not read ' + name + ' back (' + (e && e.message) + ')';
+        changed();
+      });
+    }, 250);
+  };
+
+  /** Device-truth coverage of a MIDI file's usage map. Unknown when nothing is
+   *  confirmed — never judged against the Studio draft. */
+  d.coverageForUses = uses => {
+    if (!uses) return null;
+    if (!d.connected) return { state: 'unknown', why: 'not connected' };
+    if (!d.running) return { state: 'unknown', why: d.runningUnknownWhy || 'nothing confirmed yet' };
+    const gaps = diagCoverageGaps(uses, d.running.bindings);
+    return { state: gaps.length ? 'warn' : 'ok', gaps, running: d.running };
+  };
+
+  /** Editing vs Running vs Unsaved-to-device, from the draft's current text. */
+  d.editorState = draftText => {
+    if (!d.connected) return { state: 'offline' };
+    if (!d.running) return { state: 'unknown', why: d.runningUnknownWhy };
+    const df = typeof draftText === 'string' ? diagFingerprint(draftText) : null;
+    return { state: df && df === d.running.fingerprint ? 'in-sync' : 'differs', running: d.running };
+  };
+
+  /** Short label for the confirmed running patch. */
+  d.runningLabel = () => {
+    if (!d.running) return null;
+    const what = d.running.title || d.running.name || 'live patch';
+    const how = d.running.source === 'apply' ? 'confirmed via apply' : 'read back after load';
+    return what + ' · ' + how + (d.running.rev != null ? ' · rev ' + d.running.rev : '');
+  };
+
+  /** Start the pedal's own quiet test tone (it stops itself on the device;
+   *  the timer here only tidies the UI). */
+  d.toneStart = opts => {
+    opts = opts || {};
+    const ms = Math.max(100, Math.min(5000, opts.ms || 1000));
+    if (!d.connected) return Promise.resolve({ ok: false, reason: 'not connected' });
+    if (d.tone.supported === false) return Promise.resolve({ ok: false, reason: 'unsupported' });
+    let line = 'tone ' + ms;
+    if (opts.freq) line += ' ' + opts.freq;
+    if (opts.level) line += ' ' + opts.level;
+    return Promise.resolve(deps.send(line, { timeout: 3000 })).then(() => {
+      d.tone.supported = true; d.tone.active = true; d.tone.lastError = null;
+      d.tone.until = deps.now() + ms;
+      if (d.tone.timer) deps.clearTimeout(d.tone.timer);
+      d.tone.timer = deps.setTimeout(() => { d.tone.timer = null; d.tone.active = false; changed(); }, ms + 500);
+      changed();
+      return { ok: true, ms };
+    }).catch(e => {
+      const msg = (e && e.message) || 'failed';
+      if (/unknown command/i.test(msg)) d.tone.supported = false;   // old firmware: no generator
+      d.tone.lastError = msg;
+      changed();
+      return { ok: false, reason: d.tone.supported === false ? 'unsupported' : msg };
+    });
+  };
+
+  d.toneStop = () => {
+    if (d.tone.timer) { deps.clearTimeout(d.tone.timer); d.tone.timer = null; }
+    d.tone.active = false;
+    changed();
+    if (d.connected && d.tone.supported)
+      return Promise.resolve(deps.send('tone off', { timeout: 3000 })).catch(() => {});
+    return Promise.resolve();
+  };
+
+  /** The "no sound?" findings, from measured state only. `midiSent` is how
+   *  many MIDI events this browser/bridge transmitted (evidence of sending,
+   *  never of sounding). */
+  d.findings = midiSent => {
+    const out = [];
+    if (!d.connected) {
+      out.push({ level: 'warn', text: 'Not connected — connect over USB or the network first.' });
+      return out;
+    }
+    const st = d.status;
+    if (!st) {
+      out.push({ level: 'note', text: 'Waiting for the first status report from the pedal…' });
+      return out;
+    }
+    const vol = typeof st.volume === 'number' ? st.volume : null;
+    if (vol !== null && vol <= 0.02)
+      out.push({ level: 'warn', text: 'Pedal volume is ' + Math.round(vol * 100) + '% — turn it up (VOL in the OUTPUT section).' });
+    else if (vol !== null && vol < 0.2)
+      out.push({ level: 'note', text: 'Pedal volume is only ' + Math.round(vol * 100) + '%.' });
+    if (st.source === 'usb')
+      out.push({ level: 'warn', text: 'The instrument source is USB audio, not the input jack — a guitar plugged into line-in stays silent until you switch back (source line).' });
+    if (st.bypass === true)
+      out.push({ level: 'note', text: 'FX bypass is ON: the guitar passes through dry, but effects and synth instruments are muted.' });
+    const pin = st.peak_in, pout = st.peak_out;
+    if (typeof pin === 'number' && typeof pout === 'number') {
+      if (pin < 0.01 && pout < 0.01)
+        out.push({ level: 'note', text: 'No input or output signal is being measured right now — play something (or run the test tone) while watching the IN/OUT meters.' });
+      else if (pin >= 0.05 && pout < 0.01)
+        out.push({ level: 'warn', text: 'Input arrives (peak ' + pin.toFixed(2) + ') but the output is silent — the running patch may be muting it. Try bypass, reload the preset, or apply a known-good one.' });
+      if (pout >= 0.05)
+        out.push({ level: 'ok', text: 'The pedal is measurably producing output (peak ' + pout.toFixed(2) + '). If you still hear nothing, the problem is downstream of the OUT jack — see the hardware checklist below.' });
+    }
+    // MIDI: reception/trigger evidence, never inferred from transmission
+    if (d.counters) {
+      const c = d.counters;
+      let t = 'The pedal reports ' + c.rx + ' MIDI note events received and ' + c.trig + ' voice triggers'
+            + ' (' + c.voices + (c.voices === 1 ? ' voice' : ' voices') + ' bound in the running patch).';
+      if (midiSent > 0 && c.voices === 0)
+        out.push({ level: 'warn', text: t + ' Notes are being sent, but the running patch has no MIDI-bound instrument to play them.' });
+      else if (midiSent > 0 && c.trig === 0)
+        out.push({ level: 'warn', text: t + ' Notes are being sent but no voice has fired — check the channels the file uses against the running patch (coverage marks in the MIDI panel).' });
+      else
+        out.push({ level: 'note', text: t });
+    } else if (midiSent > 0) {
+      out.push({ level: 'note', text: midiSent + ' MIDI events were transmitted to the pedal, but this firmware does not report reception or voice triggers — Studio cannot confirm they arrived or made a sound (firmware 2.2.2+ reports both).' });
+    }
+    return out;
+  };
+
+  return d;
+}
+
+/* ---- Node export so editor/tests/ can unit-test the pure logic ---- */
+if (typeof module !== 'undefined' && module.exports)
+  module.exports = { createDiagnostics, diagFingerprint, diagBindingsFromText,
+                     diagCoverageGaps, diagTitleFromText, diagRevFromAck };
+
+/* ---- browser wiring (hooks called from the device link / MIDI panel) ---- */
+let diag = null;
+
+function diagOnStatus(st) { if (diag) diag.onStatus(st); }
+function diagOnEvent(ev) { if (diag) diag.onEvent(ev); }
+function diagOnDeviceLoad(name, ack) { if (diag) diag.onDeviceLoad(name, ack); }
+function diagOnApplyResult(ok, text, ack) { if (diag) diag.onApplyResult(ok, text, ack); }
+function diagOnLinkDown(why) { if (diag) diag.onDisconnect(why); }
+function diagOnConnect() {
+  if (!diag) return;
+  diag.onConnect();
+  // the pedal told us which stored preset it is running — read it back so the
+  // session starts with confirmed content (a live-applied patch stays unknown)
+  const name = dev.currentIndex >= 0 ? dev.presets[dev.currentIndex] : '';
+  if (name) diag.confirmByName(name);
+  diagPaintSoon();
+}
+
+/** Coverage of a MIDI file against the CONFIRMED running patch (not the draft). */
+function deviceMidiCoverage(file) {
+  if (!file || !file.uses || !diag) return null;
+  return diag.coverageForUses(file.uses);
+}
+function deviceMidiCoverageNote(cov, file) {
+  if (!cov) return '';
+  if (cov.state === 'unknown') {
+    const dc = midiCoverage(file);
+    let t = 'Studio has not confirmed what the pedal is running (' + (cov.why || 'unknown') + '), '
+          + 'so it cannot say whether these notes will sound. Apply the current preset or load one '
+          + 'from DEVICE PRESETS to confirm.';
+    if (dc) t += dc.ok ? ' The draft open in Studio does cover this file.'
+                       : ' The draft open in Studio would also miss some of its notes.';
+    return t;
+  }
+  if (cov.state === 'ok') return '';
+  const subject = 'the patch running on the pedal ('
+    + ((cov.running && (cov.running.title || cov.running.name)) || 'live patch') + ')';
+  let t = midiCoverageNote({ ok: false, gaps: cov.gaps }, subject);
+  const dc = midiCoverage(file);
+  if (dc && dc.ok) t += ' The draft open in Studio does cover it — Apply it, or Push and Load it.';
+  return t;
+}
+/** Repaint key for the MIDI rows: coverage marks depend on the running patch. */
+function diagCoverageSig() {
+  if (!diag) return 'off';
+  return diag.running ? diag.running.fingerprint + ':' + (diag.running.rev == null ? '' : diag.running.rev)
+                      : 'none:' + (diag.runningUnknownWhy || '') + ':' + (diag.connected ? 1 : 0);
+}
+
+/* ---- diagnostics panel (device column) ---- */
+let diagPaintTimer = null;
+function diagPaintSoon() {
+  if (typeof document === 'undefined' || diagPaintTimer) return;
+  diagPaintTimer = setTimeout(() => { diagPaintTimer = null; diagPaint(); }, 100);
+}
+
+function diagBuildSection() {
+  const sec = document.createElement('div');
+  sec.className = 'dev-sec coll closed'; sec.id = 'diagSec';
+  sec.innerHTML = `<h3 role="button" tabindex="0" aria-expanded="false" aria-controls="diagBody"><span class="caret">▼</span> NO SOUND? · DIAGNOSTICS</h3>
+  <div class="sec-body" id="diagBody">
+    <div class="midi-line"><span>Editing</span><span class="mono" id="diagEditing">—</span></div>
+    <div class="midi-line"><span>Running on pedal</span><span class="mono" id="diagRunning">—</span></div>
+    <div class="diag-sync" id="diagSync"></div>
+    <div class="midi-line"><span>Signal</span><span class="mono" id="diagSignal">—</span></div>
+    <div class="actions-row">
+      <button class="btn sm" id="diagToneBtn" title="A quiet 1-second tone from the pedal itself — it stops on its own and the running preset is untouched">Play test tone</button>
+      <button class="btn sm" id="diagRecheckBtn" title="Read the running preset back from the pedal">Re-check</button>
+    </div>
+    <div class="play-hint" id="diagToneHint"></div>
+    <div id="diagFindings"></div>
+    <div class="hint" style="margin-top:6px" id="diagHw">Things Studio cannot measure — worth checking by hand:
+      the powered speaker is on and its battery is not flat (a flat speaker is perfectly silent),
+      the lead is seated all the way into the OUT jack and the speaker’s input,
+      the speaker/amp volume is up, and the pedal’s power light is on.</div>
+  </div>`;
+  $('#outputSec').insertAdjacentElement('afterend', sec);
+  const h = sec.querySelector('h3');
+  const toggle = () => {
+    sec.classList.toggle('closed');
+    h.setAttribute('aria-expanded', String(!sec.classList.contains('closed')));
+    if (!sec.classList.contains('closed')) diagPaint();
+  };
+  h.addEventListener('click', toggle);
+  h.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  $('#diagToneBtn').addEventListener('click', async () => {
+    if (!diag) return;
+    if (diag.tone.active) { await diag.toneStop(); return; }
+    const r = await diag.toneStart({ ms: 1000 });
+    if (!r.ok && r.reason === 'unsupported')
+      consoleLog('err', 'This firmware has no test-tone generator — it needs firmware 2.2.2 or newer.');
+    diagPaint();
+  });
+  $('#diagRecheckBtn').addEventListener('click', () => {
+    if (!diag || !link.connected) return;
+    refreshDeviceList().then(() => {
+      const name = dev.currentIndex >= 0 ? dev.presets[dev.currentIndex] : '';
+      if (name) diag.confirmByName(name);
+      else if (!diag.running) { diag.runningUnknownWhy = 'the pedal is running a live-applied patch — Apply from Studio to confirm it'; diagPaint(); }
+    });
+  });
+  diagPaint();
+}
+
+function diagPaint() {
+  const sec = $('#diagSec');
+  if (!sec || !diag) return;
+  midiPaint();                                    // coverage marks share this state
+  if (sec.classList.contains('closed')) return;   // panel body hidden — skip the work
+  const p = current();
+  const draftText = p ? generateText(p) : '';
+  $('#diagEditing').textContent = p ? (p.title || ensureFileName(p)) : '—';
+  const es = diag.editorState(draftText);
+  const run = $('#diagRunning'), sync = $('#diagSync');
+  if (es.state === 'offline') {
+    run.textContent = 'not connected';
+    sync.textContent = ''; sync.className = 'diag-sync';
+  } else if (es.state === 'unknown') {
+    run.textContent = 'unknown — ' + (es.why || 'nothing confirmed');
+    sync.textContent = 'Studio will not guess: apply or load a preset to confirm what the pedal is running.';
+    sync.className = 'diag-sync';
+  } else {
+    run.textContent = diag.runningLabel();
+    const same = es.state === 'in-sync';
+    sync.textContent = same ? 'The draft in Studio matches what is confirmed running.'
+                            : 'The draft in Studio differs from what is running — unapplied changes (Apply live, or Push + Load).';
+    sync.className = 'diag-sync ' + (same ? 'insync' : 'differs');
+  }
+  const st = diag.status;
+  $('#diagSignal').textContent = st
+    ? 'in ' + (st.peak_in != null ? st.peak_in.toFixed(2) : '?')
+      + ' · out ' + (st.peak_out != null ? st.peak_out.toFixed(2) : '?')
+      + ' · vol ' + (st.volume != null ? Math.round(st.volume * 100) + '%' : '?')
+      + ' · ' + (st.source || 'line') + (st.bypass ? ' · BYPASS' : '')
+    : '—';
+  const toneBtn = $('#diagToneBtn'), toneHint = $('#diagToneHint');
+  toneBtn.disabled = !link.connected || diag.tone.supported === false;
+  toneBtn.textContent = diag.tone.active ? '■ Stop tone' : 'Play test tone';
+  toneHint.textContent =
+      diag.tone.supported === false ? 'Not available: this firmware (before 2.2.2) has no test-tone generator, so Studio cannot make the pedal beep. Everything else here still works.'
+    : diag.tone.active ? 'Playing a quiet tone from the pedal — it stops by itself. Watch the OUT meter: if it moves and you hear nothing, the problem is after the OUT jack.'
+    : diag.tone.lastError ? 'Test tone: ' + diag.tone.lastError
+    : '';
+  const box = $('#diagFindings');
+  box.textContent = '';
+  const sent = midi.outCount + ((midi.status && midi.status.out_events) || 0);
+  for (const f of diag.findings(sent)) {
+    const div = document.createElement('div');
+    div.className = 'diag-item ' + f.level;
+    div.textContent = f.text;
+    box.appendChild(div);
+  }
+}
+
+if (typeof document !== 'undefined') {
+  diag = createDiagnostics({
+    now: () => Date.now(),
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: id => clearTimeout(id),
+    send: (line, opts) => sendCmd(line, opts),
+    getPresetText: name => sendCmd('get ' + name, { kind: 'get' }).then(r => r && r.content),
+    onChange: () => diagPaintSoon(),
+  });
+}
+/* ==========================================================================
+   GLS-DIAG END
+   ========================================================================== */
 
 /* ==========================================================================
    Layout — panels, regions and views.
@@ -6297,7 +6786,7 @@ function midiPaint() {
   // files
   const rows = tr === 'bridge' ? midi.files : midi.local;
   const playingFile = tr === 'bridge' ? (st.playing ? st.file : '') : (midi.player ? midi.player.name : '');
-  const sig = [tr, playingFile, midi.covOpen || '', midi.presetRev || 0,
+  const sig = [tr, playingFile, midi.covOpen || '', midi.presetRev || 0, diagCoverageSig(),
                rows.map(f => f.name + '/' + (f.bytes || 0) + '/' + (f.mtime || 0) + '/' + (f.uses ? 1 : 0)).join(',')].join('|');
   if (sig !== midi.listSig) midiPaintRows(rows, tr, st, sig);
   midiPaintTail(tr, st);
@@ -6310,14 +6799,23 @@ function midiPaintRows(rows, tr, st, sig) {
   for (const f of rows) {
     const row = document.createElement('div'); row.className = 'looprow';
     const nm = document.createElement('span'); nm.textContent = f.name; nm.title = f.name; row.appendChild(nm);
-    const cov = midiCoverage(f);
+    // GLS-DIAG: coverage is judged against the CONFIRMED running patch, and is
+    // honestly "unknown" (grey ?) when nothing has been confirmed — the Studio
+    // draft never stands in for what the hardware is running.
+    const cov = deviceMidiCoverage(f);
     let badge = null;
     if (cov) {
       badge = document.createElement('span');
-      badge.className = 'midi-cov ' + (cov.ok ? 'ok' : 'warn');
-      badge.textContent = cov.ok ? '\u2713' : '\u26a0';
-      if (cov.ok) badge.title = 'The preset open here answers every note this file plays';
-      else { badge.title = 'Some notes will be silent — hover or click for which'; badge.setAttribute('role', 'button'); badge.tabIndex = 0; }
+      const cls = cov.state === 'ok' ? 'ok' : cov.state === 'warn' ? 'warn' : 'unknown';
+      badge.className = 'midi-cov ' + cls;
+      badge.textContent = cov.state === 'ok' ? '\u2713' : cov.state === 'warn' ? '\u26a0' : '?';
+      if (cov.state === 'ok') badge.title = 'The patch confirmed running on the pedal answers every note this file plays';
+      else {
+        badge.title = cov.state === 'warn'
+          ? 'Some notes will be silent on the pedal — hover or click for which'
+          : 'Studio has not confirmed what the pedal is running — hover or click for why';
+        badge.setAttribute('role', 'button'); badge.tabIndex = 0;
+      }
       row.appendChild(badge);
     }
     // The row's button is a stop button for as long as its file is playing — the
@@ -6346,11 +6844,12 @@ function midiPaintRows(rows, tr, st, sig) {
     });
     row.appendChild(rm);
     box.appendChild(row);
-    if (cov && !cov.ok) {
+    if (cov && cov.state !== 'ok') {
       // The explanation is wanted once, not on every glance: it shows while the
       // warning is hovered and stays put when it is clicked (click again to fold).
-      const w = document.createElement('div'); w.className = 'midi-cov-note'; w.hidden = true;
-      w.textContent = midiCoverageNote(cov); box.appendChild(w);
+      const w = document.createElement('div');
+      w.className = 'midi-cov-note' + (cov.state === 'unknown' ? ' info' : ''); w.hidden = true;
+      w.textContent = deviceMidiCoverageNote(cov, f); box.appendChild(w);
       let pinned = midi.covOpen === f.name;
       w.hidden = !pinned;
       badge.addEventListener('mouseenter', () => { w.hidden = false; });
@@ -6564,6 +7063,7 @@ function netConnect(host) {
         } else {
           link.pedalPresent = false;
           failAllPending('pedal not connected');
+          diagOnLinkDown('pedal unplugged');    // GLS-DIAG
           link.binMode = null;
           link.rxCarry = new Uint8Array(0);
           dev.info = null;
@@ -6612,12 +7112,14 @@ async function linkUp(msg) {
   // Footswitch map + loop files (older firmware answers #ERR — settle() logs it).
   try { await sendCmd('switches'); } catch (e) {}
   try { await sendCmd('loops'); } catch (e) {}
+  diagOnConnect();                                  // GLS-DIAG: confirm what is running
 }
 
 async function linkDisconnect(silent) {
   midiBridgeDisconnect();
   const wasConnected = link.connected;
   flushHeldNotes();                          // best effort: note-offs straight to the transport
+  if (wasConnected) diagOnLinkDown('disconnected');   // GLS-DIAG
   link.connected = false;
   failAllPending('disconnected');
   link.rxCarry = new Uint8Array(0);
@@ -6808,7 +7310,7 @@ function handleLine(line) {
       // Piggy-back state off the acknowledgement text (e.g. "#OK load 02_x.txt",
       // "#OK bypass on", "#OK vol 0.70").
       const mLoad = rest.match(/^load\s+(\S+)/);
-      if (mLoad) { dev.presetName = mLoad[1]; renderDevPresetName(); markDeviceCurrent(mLoad[1]); }
+      if (mLoad) { dev.presetName = mLoad[1]; renderDevPresetName(); markDeviceCurrent(mLoad[1]); diagOnDeviceLoad(mLoad[1], rest); /* GLS-DIAG */ }
       const mByp = rest.match(/^bypass\s+(on|off)/);
       if (mByp) { dev.bypass = mByp[1] === 'on'; renderBypass(); }
       settle(null, { ok: rest });
@@ -6935,11 +7437,13 @@ function applyStatus(st) {
   if (typeof st.volume === 'number') { dev.volume = st.volume; renderVolume(false); }
   renderMetersStatic();
   renderLooper();
+  diagOnStatus(st);                                 // GLS-DIAG
 }
 function applyEvent(ev) {
   if (ev.loop) { dev.loop.state = ev.loop; renderLooper(); }
   if (ev.preset) { dev.presetName = ev.preset; renderDevPresetName(); markDeviceCurrent(ev.preset); }
   if (typeof ev.bypass === 'boolean') { dev.bypass = ev.bypass; renderBypass(); }
+  diagOnEvent(ev);                                  // GLS-DIAG
 }
 function markDeviceCurrent(name) {
   const i = dev.presets.indexOf(name);
@@ -6965,8 +7469,12 @@ async function applyLive(quiet) {
   const bytes = enc.encode(text);
   if (bytes.length > MAX_FILE_BYTES) { consoleLog('err', `Cannot apply: preset is ${bytes.length} bytes (> 16 KB)`); return; }
   if (!patchIsValid(text, quiet ? null : 'apply')) return;
-  try { await sendCmd(`apply ${bytes.length}`, { payload: bytes, kind: 'send' }); }
-  catch (e) { /* logged by settle */ }
+  try {
+    const r = await sendCmd(`apply ${bytes.length}`, { payload: bytes, kind: 'send' });
+    diagOnApplyResult(true, text, r && r.ok);       // GLS-DIAG: these exact bytes are confirmed running
+  } catch (e) {
+    diagOnApplyResult(false, text, e.message);      // GLS-DIAG: the pedal kept its previous patch
+  }
 }
 
 async function pushCurrent() {
@@ -7794,6 +8302,7 @@ function renderCode() {
   ui.patchValid = !v.errors.length;
   syncApplyButtons();
   renderIssues(v);
+  diagPaintSoon();                              // GLS-DIAG: Editing-vs-Running line follows the draft
 }
 /** Apply / Push stay disabled while the pedal would reject the generated patch. */
 function syncApplyButtons() {
@@ -8713,6 +9222,7 @@ function init() {
   chanBuildSection();
   scoreBuildSection();
   sysBuildSection();
+  diagBuildSection();                           // GLS-DIAG: the "no sound?" panel
   // Served by the companion Pi: a plain link to its setup page, right next to the connection pill
   if (/^https?:$/.test(location.protocol)) {
     const a = document.createElement('a');

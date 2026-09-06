@@ -60,5 +60,18 @@
 #define PATCH_MAX_STREAMS  48
 #define PATCH_MAX_CONNS    96
 
-#define FIRMWARE_VERSION   "2.2.1"
+#define FIRMWARE_VERSION   "2.2.2"
 #define PROTOCOL_VERSION   1
+
+// ---------------------------------------------------------------- diagnostics
+// The `tone` serial command plays a quiet sine straight into the output stage
+// (after the preset graph, so the running patch is never touched) and stops
+// itself. Clamps keep a mistyped command from being loud or endless.
+#define TONE_MS_MIN        100
+#define TONE_MS_MAX        5000
+#define TONE_MS_DEFAULT    1000
+#define TONE_FREQ_MIN      40.0f
+#define TONE_FREQ_MAX      5000.0f
+#define TONE_FREQ_DEFAULT  440.0f
+#define TONE_LEVEL_MAX     0.30f
+#define TONE_LEVEL_DEFAULT 0.15f

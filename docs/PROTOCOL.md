@@ -16,10 +16,10 @@ It is designed to be pleasant for humans *and* trivially parseable by the Studio
 | `status` | `#STATUS {…}` | see payload below |
 | `monitor on` / `monitor off` | `#OK monitor` then periodic `#STATUS {…}` at 4 Hz | live meters / loop position for UIs |
 | `list` | `#PRESETS {"current":1,"presets":["01_clean.txt","02_ambient.txt"]}` | filename order |
-| `load <index|name>` | `#OK load 02_ambient.txt` or `#ERR …` | loads + applies preset |
+| `load <index|name>` | `#OK load 02_ambient.txt rev=4` or `#ERR …` | loads + applies preset (`rev=` since firmware 2.2.2 — see Diagnostics) |
 | `get <name>` | `#FILE <name> <len>\n` + exactly `<len>` raw bytes + `\n#END\n` | read a preset file |
 | `put <name> <len>` | `#SEND` → send exactly `<len>` bytes → `#OK put` or `#ERR …` | write preset to SD + flash mirror. `<len>` ≤ 16384 |
-| `apply <len>` | `#SEND` → send exactly `<len>` bytes → `#OK apply` or `#ERR line <n>: …` | parse + apply live **without saving** — used by the editor for live tweaking |
+| `apply <len>` | `#SEND` → send exactly `<len>` bytes → `#OK apply rev=5` or `#ERR line <n>: …` | parse + apply live **without saving** — used by the editor for live tweaking. On failure the previous patch keeps running. |
 | `rm <name>` | `#OK rm` or `#ERR …` | delete preset from SD + mirror |
 | `next` / `prev` | `#OK load <name>` or `#ERR …` | cycle presets (same as footswitches); presets that fail to load are skipped |
 | `bypass on|off|toggle` | `#OK bypass on` | FX bypass |
@@ -38,6 +38,8 @@ It is designed to be pleasant for humans *and* trivially parseable by the Studio
 | `loop rm <name>` | `#OK loop rm` | delete a loop file |
 | `loop get <name>` | `#FILE <name> <len>\n` + bytes + `\n#END\n` | download a loop WAV (streamed from the card) |
 | `loop put <name> <len>` | `#SEND` → send `<len>` bytes → `#OK loop put` | upload a WAV to `/loops` (streamed to the card, ≤ 8 MB, 10 s idle timeout; a failed upload leaves the previous file intact); follow with `loop load` to hear it. Names may omit `.wav`. |
+| `tone [ms] [freq] [level]` | `#OK tone 1000` | **firmware 2.2.2+** — a quiet diagnostic sine, mixed in *after* the preset graph (the running patch, the loop and USB recordings are untouched). Stops by itself; clamps: 100–5000 ms (default 1000), 40–5000 Hz (default 440), level ≤ 0.30 (default 0.15). It shows on `peak_out`, so a UI can prove the pedal is producing signal. |
+| `tone off` | `#OK tone off` | stop the test tone early |
 | `help` | human text | command summary |
 
 Unknown commands answer `#ERR unknown command`.
@@ -79,11 +81,32 @@ a `note` argument makes the group respond to that note only (drum pads).
   "loop": {"state": "playing", "len_s": 12.4, "pos_s": 3.1, "can_undo": true, "seconds_max": 95.0},
   "preset": {"index": 1, "count": 5, "name": "02_ambient.txt", "title": "Ambient Swell"},
   "bypass": false, "volume": 0.70, "source": "line",
-  "psram_mb": 16, "sd": true, "flash": true
+  "psram_mb": 16, "sd": true, "flash": true,
+  "rev": 4, "tone": false, "midi": {"rx": 128, "trig": 96, "voices": 3}
 }
 ```
 
 `loop.state` ∈ `empty | recording | playing | overdubbing | stopped`.
+
+The last line (`rev`, `tone`, `midi`) is **firmware 2.2.2+**; older firmware simply
+omits it and clients must treat those facts as unknown rather than guessing.
+
+## Diagnostics (firmware 2.2.2+)
+
+- `rev` counts successful patch loads/applies (boot load included). A UI that
+  remembers the `rev` it confirmed can tell "the running patch changed under me"
+  (footswitch, MIDI program change, another editor) apart from "still running
+  what I confirmed" — even when the preset *name* did not change. `#OK load`/
+  `#OK apply` echo the new value as `rev=N`.
+- `tone` reports whether the diagnostic test tone is sounding; its start and
+  auto-stop also push `#EVT {"tone":true|false}`.
+- `midi.rx` counts USB MIDI note on/off events the pedal received; `midi.trig`
+  counts voices that actually fired (the serial `note` command drives the same
+  allocator and counts in `trig` too); `midi.voices` is how many voice units the
+  running patch binds. The distinction is deliberate: bytes *sent to* the pedal
+  are not evidence anything arrived (`rx`), and arrival is not evidence anything
+  sounded (`trig`). On older firmware none of this is reported, and a client can
+  only honestly say "transmitted, delivery unconfirmed".
 
 ## Transfer framing
 
@@ -107,8 +130,9 @@ Program Change *n* loads preset *n*. CC 7 volume; CC 80 LOOP tap, 81 STOP, 82 UN
 ## Async events
 
 State changes push `#EVT {"loop":"recording"}` / `#EVT {"preset":"03_crunch.txt"}` /
-`#EVT {"bypass":true}` even when `monitor` is off, so UIs can stay in sync with footswitch
-actions.
+`#EVT {"bypass":true}` / `#EVT {"tone":false}` (2.2.2+) even when `monitor` is off, so UIs
+can stay in sync with footswitch actions. An empty `#EVT {"preset":""}` means a live-applied
+patch replaced the stored preset.
 
 
 ## The companion bridge's MIDI endpoints
