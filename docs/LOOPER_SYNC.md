@@ -23,7 +23,7 @@ reset to defaults at power-up.
 | `bpm` | 30–300 | The internal tempo. |
 | `countin` | 0–8 bars (default 1) | Metronome count-in before recording starts. 0 = start on the boundary with no count-in. |
 | `bars` | 0–64 (default 0) | Fixed recording length. With e.g. `4`, the loop closes itself after exactly 4 bars. `0` = free: tap LOOP to close on the next boundary. |
-| `met` | `off` / `rec` (default) / `on` | Metronome click: never, while recording, or whenever the grid is running. Count-ins always click — that is their job. |
+| `met` | `off` / `rec` (default) / `on` | Metronome click: never, while recording, or whenever the grid is running. With the internal tempo, `on` also clicks while the looper is idle so you can settle in first — and a tap then arms **on that grid** instead of resetting it. Count-ins always click — that is their job. |
 | `metvol` | 0–1 (default ~0.6) | Click level. |
 
 The meter is **4/4 only** in this first version (the engine underneath is
@@ -32,10 +32,16 @@ parameterised for other x/4 meters; they are not yet exposed).
 ## How a synced take works
 
 1. Tap **LOOP** on an empty looper.
-   - *Internal tempo:* your tap defines the downbeat. With a count-in, the
-     metronome counts `countin` bars and recording starts dead on the following
-     downbeat — the count-in duration is sample-exact. Without one, recording
-     starts immediately (still grid-aligned, since the grid starts at your tap).
+   - *Internal tempo, no metronome running:* your tap defines the downbeat.
+     With a count-in, the metronome counts `countin` bars and recording starts
+     dead on the following downbeat — the count-in duration is sample-exact.
+     Without one, recording starts immediately (still grid-aligned, since the
+     grid starts at your tap).
+   - *Internal tempo with `met on`:* the metronome is already clicking while
+     idle so you can settle into the tempo first — and your tap **rides that
+     grid** instead of resetting it. Recording arms and starts on the grid's
+     next beat or bar (count-in: next bar line, then `countin` bars), and the
+     click never shifts.
    - *MIDI clock:* the pedal waits for the next beat (`mode beat`) or bar line
      (`mode bar`) of the incoming clock. With a count-in it first aligns to a
      bar line, then counts `countin` bars.
@@ -69,14 +75,26 @@ connected computer/DAW:
   last measured tempo, so a dying DAW can't make the pedal record forever.
 - Tempo is measured from the tick spacing (smoothed over a few beats, clamped
   to 10–1000 BPM so one garbled tick can't fling it).
-- If you tap LOOP with `source midi` but no clock running, the tap simply
-  behaves manually (legacy) — it never waits forever for a clock that isn't
-  there. The status line shows the clock state (`idle/running/stopped/lost`).
+- If you tap LOOP with `source midi` but no clock running, the tap is
+  **refused** — nothing happens. You asked for sync; recording an
+  unsynchronised take by surprise would be worse than doing nothing. The
+  Studio SYNC panel shows a prominent warning with the clock state
+  (`idle/running/stopped/lost`) and the way out (start the DAW's clock, or
+  switch the source to internal).
 
-The pedal does **not send** MIDI clock. If you want the DAW and pedal in sync,
-make the DAW the master and the pedal follows. Outgoing master clock was left
-out deliberately: incoming sync covers the recording use case, and a
-follower-only design avoids two half-good clocks fighting each other.
+## Not supported (deliberately)
+
+- **Outgoing MIDI clock, in any form.** The pedal only *follows* incoming USB
+  MIDI clock; it never generates master clock — not from its internal tempo,
+  and not automatically from the companion Pi's MIDI file player either. If
+  you want the DAW and pedal in sync, make the DAW the master. A
+  follower-only design avoids two half-good clocks fighting each other.
+- **Meters other than x/4.** The engine is parameterised for 1–12 quarter-note
+  beats per bar, but only 4/4 is exposed in this version.
+- **MIDI Song Position Pointer** — bar phase comes from Start and counted
+  beats.
+- **Quantised overdubs** — once a loop exists, the loop itself is the timing
+  reference and punch in/out stays manual.
 
 ## Timing accuracy — honest numbers
 
@@ -87,13 +105,10 @@ follower-only design avoids two half-good clocks fighting each other.
   loop's downbeat sits exactly on the grid.
 - **MIDI clock:** beat boundaries are quantised to the start of the audio block
   in which they are processed, so external sync is accurate to about **one
-  audio block (128 samples ≈ 2.9 ms) plus USB MIDI polling latency** (the main
-  loop usually polls well under 1 ms, but SD/flash activity can stretch a
-  poll). Expect roughly ±3 ms against the DAW's grid — tight enough to feel
-  locked; not sample-locked. Tempo wobble from the DAW is smoothed over a few
-  beats.
-- MIDI **Song Position Pointer is not handled** — bar phase comes from Start
-  and counted beats.
+  audio block (128 samples ≈ 2.9 ms) plus USB MIDI polling latency**. These
+  are *design bounds derived from the code* (block size, poll placement) —
+  no physical latency measurements have been made against real hardware or a
+  real DAW yet. Tempo wobble from the DAW is smoothed over a few beats.
 
 ## The metronome's audio route
 
@@ -112,10 +127,19 @@ along before you arm, and while recording.
 
 ## Testing
 
-The whole timing engine (`firmware/src/LooperTiming.h`) and the MIDI clock
-follower (`firmware/src/MidiClockIn.h`) are portable C++ with no Arduino
-dependencies. `firmware/test/host/run.sh` compiles the exact code the audio ISR
-runs and drives it with a deterministic fake clock: boundary arming, exact
-count-in and fixed-bar lengths, quantised stops, clock loss/Stop cancellation,
-capacity clamping, legacy manual behaviour, and clock-follower tempo/timeout
-handling.
+`firmware/test/host/run.sh` builds and runs two host suites, no hardware or
+PlatformIO needed:
+
+- `test_timing` — the timing engine (`firmware/src/LooperTiming.h`) and MIDI
+  clock follower (`firmware/src/MidiClockIn.h`) are portable C++ with no
+  Arduino dependencies, compiled as-is and driven with a deterministic fake
+  clock: boundary arming (fresh and established grids), exact count-in and
+  fixed-bar lengths, quantised stops, no-clock refusal, clock-loss/Stop
+  cancellation, capacity clamping, legacy manual behaviour, and follower
+  tempo/beat/timeout handling.
+- `test_looper` — the real `AudioEffectLooper.cpp` compiled against small host
+  shims for `AudioStream`/EXTMEM, verifying the looper's *actual recorded
+  sample lengths* and state transitions: same-block config+arm ordering,
+  count-in and fixed-bar loops closing at the exact sample, quantised manual
+  closes, STOP cancelling an armed take, the MIDI-no-clock refusal, and that
+  sync never destroys an existing loop.

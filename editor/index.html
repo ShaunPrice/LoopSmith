@@ -363,6 +363,7 @@ input[type=range]::-moz-range-thumb{
 .syncrow select,.syncrow input{background:var(--card);color:var(--ink);border:1px solid #262b36;border-radius:6px;padding:3px 5px;font-size:11px;font-family:inherit}
 #syBpm{width:52px;font-family:var(--mono);font-variant-numeric:tabular-nums}
 #syncStat{font-size:11px;color:var(--muted);margin-top:2px}
+#syncStat.warn{color:var(--red);font-weight:700}
 #devPresetName{font-family:var(--mono);font-size:11.5px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .volrow{display:flex;align-items:center;gap:8px}
 .volrow .ro{flex:0 0 40px}
@@ -8653,18 +8654,25 @@ function renderSync() {
   if (s.countin != null) put('syCi', s.countin);
   if (s.bars != null) put('syBars', s.bars);
   put('syMet', s.met || 'rec');
-  let txt;
+  let txt, warn = false;
   if (!s.mode || s.mode === 'off') {
     txt = 'Sync off — taps record immediately.';
+  } else if (s.src === 'midi' && s.clk !== 'running') {
+    // The pedal REFUSES to arm without a clock (it never records an
+    // unsynchronised take when sync was asked for) — say so loudly.
+    warn = true;
+    txt = `⚠ MIDI clock ${s.clk || 'idle'} — LOOP won't arm until the DAW sends clock (Start + ticks), or switch CLOCK to Internal.`;
   } else {
     txt = `Quantise to ${s.mode} · ${Math.round(s.bpm || 0)} BPM`;
-    if (s.src === 'midi') txt += ` · MIDI clock ${s.clk || 'idle'}`;
+    if (s.src === 'midi') txt += ' · MIDI clock running';
     if (s.phase === 'countin') txt += ` · count-in, beat ${s.beat}`;
     else if (s.phase === 'armed') txt += ` · armed — starts on the next ${s.mode}`;
     else if (s.phase === 'recording' && s.bars > 0) txt += ` · recording ${s.bars} bar${s.bars > 1 ? 's' : ''}`;
     else if (s.phase === 'closing') txt += ` · closing on the next ${s.mode}`;
   }
-  $('#syncStat').textContent = txt;
+  const el = $('#syncStat');
+  el.textContent = txt;
+  el.classList.toggle('warn', warn);
 }
 function renderDevPresetName() { $('#devPresetName').textContent = dev.presetName || '-'; }
 function renderBypass() {

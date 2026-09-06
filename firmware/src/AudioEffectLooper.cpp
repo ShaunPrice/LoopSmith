@@ -226,11 +226,15 @@ void AudioEffectLooper::update()
         return;
     }
 
+    // Staged sync settings and clock events must land BEFORE commands are
+    // interpreted: a config change and a record tap posted in the same block
+    // (the editor does exactly this) must see the new mode/source/tempo.
+    applySyncStaging();
+
     uint8_t cmd = __atomic_exchange_n(&pendingCmd, 0, __ATOMIC_ACQ_REL);
     if (cmd) handleCommand(cmd);
 
     // Advance the musical clock and act on what falls inside this block.
-    applySyncStaging();
     LooperTiming::Action act = timing_.advance(AUDIO_BLOCK_SAMPLES);
     if (act.cancelled && (isrState == ARMED || isrState == COUNT_IN)) {
         isrState = EMPTY;   // clock loss / MIDI Stop / config change while armed

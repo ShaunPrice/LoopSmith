@@ -42,7 +42,7 @@ It is designed to be pleasant for humans *and* trivially parseable by the Studio
 | `tone off` | `#OK tone off` | stop the test tone early |
 | `sync` | `#SYNC {…}` | current musical-sync settings and state — see below and docs/LOOPER_SYNC.md |
 | `sync mode off\|beat\|bar` | `#SYNC {…}` | quantise recording to nothing (legacy, the default), the next beat, or the next bar |
-| `sync source internal\|midi` | `#SYNC {…}` | tempo source: the configured BPM, or incoming USB MIDI clock (24 PPQN) |
+| `sync source internal\|midi` | `#SYNC {…}` | tempo source: the configured BPM, or incoming USB MIDI clock (24 PPQN). With `midi` and no clock running, a record tap is refused (nothing happens) rather than recording unsynchronised — `clk` in the payload says why |
 | `sync bpm <30–300>` | `#SYNC {…}` | internal tempo |
 | `sync countin <0–8>` | `#SYNC {…}` | metronome count-in bars before recording starts (0 = off) |
 | `sync bars <0–64>` | `#SYNC {…}` | fixed recording length in bars — the loop closes itself (0 = free, tap to close) |

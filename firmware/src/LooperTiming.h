@@ -8,16 +8,20 @@
 // precision even though it only runs every AUDIO_BLOCK_SAMPLES samples.
 //
 // Two tempo sources:
-//   - internal: a configured BPM. The first tap defines the downbeat (there is
-//     nothing to align to yet), so the grid resets at the tap and the optional
-//     count-in / fixed-bar schedule counts down in samples — sample exact.
+//   - internal: a configured BPM. With no grid established, the first tap
+//     defines the downbeat — the grid starts at the tap and the optional
+//     count-in / fixed-bar schedule counts down in samples, sample exact.
+//     With met "on" the metronome grid runs while idle, and an arm then rides
+//     it: recording starts on the grid's next beat/bar and the click never
+//     shifts.
 //   - MIDI clock: the grid chases beat events fed in from the USB MIDI clock
-//     follower (MidiClockIn). Between beats the grid free-runs at the last
-//     measured tempo (a flywheel), so a clock that dies mid-recording cannot
-//     leave the pedal recording forever: a fixed-length or scheduled stop
-//     completes on the flywheel. A clock loss or MIDI Stop while merely armed
-//     or counting in cancels the arm — nothing destructive can fire from a
-//     dead clock.
+//     follower (MidiClockIn). A tap with no clock running is REFUSED (the
+//     player asked for sync; recording unsynchronised would be a surprise).
+//     Between beats the grid free-runs at the last measured tempo (a
+//     flywheel), so a clock that dies mid-recording cannot leave the pedal
+//     recording forever: a fixed-length or scheduled stop completes on the
+//     flywheel. A clock loss or MIDI Stop while merely armed or counting in
+//     cancels the arm — nothing destructive can fire from a dead clock.
 //
 // The meter is x/4 only (beatsPerBar quarter notes per bar, default 4/4).
 // All methods are called from ONE context (the audio ISR, or the test). The
@@ -37,7 +41,8 @@ public:
     enum Request : uint8_t {
         REQ_IMMEDIATE = 0,  // engine declines to schedule — caller acts right now (legacy path)
         REQ_ACCEPTED,       // scheduled; watch Action for the boundary
-        REQ_IGNORED         // request makes no sense in this phase — do nothing
+        REQ_IGNORED,        // request makes no sense in this phase — do nothing
+        REQ_REFUSED         // sync was asked for but can't be honoured (no clock) — do nothing
     };
 
     // What happened inside the block just advanced over. Offsets are samples
@@ -52,8 +57,8 @@ public:
     };
 
     // --- configuration (a change while armed/counting-in cancels the arm) ---
-    void setMode(uint8_t m)      { if (m > MODE_BAR) return; if (m != mode_) { mode_ = m; abandon(); } }
-    void setSource(uint8_t s)    { if (s > SRC_MIDI) return; if (s != source_) { source_ = s; abandon(); } }
+    void setMode(uint8_t m)      { if (m > MODE_BAR) return; if (m != mode_) { mode_ = m; abandon(); internalGridRun_ = false; } }
+    void setSource(uint8_t s)    { if (s > SRC_MIDI) return; if (s != source_) { source_ = s; abandon(); internalGridRun_ = false; } }
     void setMetronome(uint8_t m) { if (m <= MET_ON) met_ = m; }
     void setBeatsPerBar(uint8_t b) { if (b >= 1 && b <= 12) beatsPerBar_ = b; }
     void setCountInBars(uint8_t b) { countInBars_ = b > 8 ? 8 : b; }
@@ -61,8 +66,10 @@ public:
     void setCapacity(uint32_t samples) { capacity_ = samples; }
     void setSamplesPerBeat(uint32_t s)
     {
-        if (s >= MIN_SPB && s <= MAX_SPB) spb_ = s;
-    }
+        if (s < MIN_SPB || s > MAX_SPB) return;
+        spb_ = s;
+        if (toNextBeat_ > s) toNextBeat_ = s;   // tempo change on a live grid: the next
+    }                                           //   beat is never more than a beat away
 
     uint8_t  mode() const        { return mode_; }
     uint8_t  source() const      { return source_; }
@@ -115,25 +122,31 @@ public:
         if (mode_ == MODE_OFF) return REQ_IMMEDIATE;
         if (phase_ != PH_IDLE) return REQ_IGNORED;
         if (source_ == SRC_MIDI) {
-            if (!extRun_) return REQ_IMMEDIATE;   // no clock to sync to: behave manually
-            if (countInBars_ > 0) {
-                phase_ = PH_COUNT_IN;
+            // Sync was asked for and there is nothing to sync to: refuse the
+            // tap rather than surprise the player with an unsynchronised take.
+            if (!extRun_) return REQ_REFUSED;
+            armOnGrid_ = true;
+        } else {
+            // Internal tempo: if the metronome grid is already going (met
+            // "on"), keep it — arming must not shift the click — and start on
+            // its next boundary. Otherwise the tap defines the downbeat.
+            armOnGrid_ = internalGridRun_;
+            if (!armOnGrid_) {
+                beatInBar_ = 0;
+                toNextBeat_ = 0;                  // a beat fires at offset 0 of this block
+                sinceBeat_ = spb_;                //   (dedupe guard must not swallow it)
+            }
+        }
+        if (countInBars_ > 0) {
+            phase_ = PH_COUNT_IN;
+            if (armOnGrid_) {
                 ciWaitAlign_ = true;              // wait for a bar line, then count
                 ciBeatsLeft_ = 0;
             } else {
-                phase_ = PH_ARMED;                // next beat (or bar) starts the take
+                ciRemain_ = (uint32_t)countInBars_ * beatsPerBar_ * spb_;
             }
         } else {
-            // Internal tempo, empty looper: the tap defines the downbeat.
-            beatInBar_ = 0;
-            toNextBeat_ = 0;                      // a beat fires at offset 0 of this block
-            sinceBeat_ = spb_;                    //   (dedupe guard must not swallow it)
-            if (countInBars_ > 0) {
-                phase_ = PH_COUNT_IN;
-                ciRemain_ = (uint32_t)countInBars_ * beatsPerBar_ * spb_;
-            } else {
-                phase_ = PH_ARMED;                // fires on that offset-0 beat
-            }
+            phase_ = PH_ARMED;
         }
         return REQ_ACCEPTED;
     }
@@ -191,8 +204,26 @@ public:
 
         int32_t startOff = -1, stopOff = -1;
 
-        // Internal count-in: a pure sample countdown (exactly bars*bpb*spb).
-        if (phase_ == PH_COUNT_IN && source_ == SRC_INTERNAL) {
+        // The internal metronome grid: with met "on" it clicks while idle so
+        // the player can settle into the tempo before arming; once running it
+        // is never reset by an arm. It starts/stops as the setting changes.
+        if (source_ == SRC_INTERNAL) {
+            bool wantIdle = (met_ == MET_ON);
+            if (wantIdle && !internalGridRun_) {
+                internalGridRun_ = true;
+                if (phase_ == PH_IDLE) {          // fresh grid: downbeat now
+                    beatInBar_ = 0;
+                    toNextBeat_ = 0;
+                    sinceBeat_ = spb_;
+                }
+            } else if (!wantIdle && internalGridRun_ && phase_ == PH_IDLE) {
+                internalGridRun_ = false;
+            }
+        }
+
+        // Off-grid count-in (fresh internal downbeat): a pure sample countdown
+        // (exactly bars*bpb*spb).
+        if (phase_ == PH_COUNT_IN && !armOnGrid_) {
             if (ciRemain_ >= n) {
                 ciRemain_ -= n;
             } else {
@@ -254,7 +285,8 @@ private:
     {
         if (mode_ == MODE_OFF) return false;
         if (phase_ != PH_IDLE) return true;
-        return source_ == SRC_MIDI && extRun_;    // idle: only a live external clock keeps time
+        // idle: a live external clock, or the internal metronome grid (met "on")
+        return source_ == SRC_MIDI ? extRun_ : internalGridRun_;
     }
 
     // After Start/Continue, free-run silently until the first tick's beat
@@ -316,9 +348,10 @@ private:
         }
         if (click && a.clickAt < 0) { a.clickAt = (int32_t)off; a.accent = barStart; }
 
-        if (phase_ == PH_COUNT_IN && source_ == SRC_MIDI) {
-            // Wait for a bar line, count bars*bpb beats (the bar-line beat is
-            // count 1), then the next bar line starts the take.
+        if (phase_ == PH_COUNT_IN && armOnGrid_) {
+            // Counting on an established grid (external clock, or the internal
+            // metronome already running): wait for a bar line, count bars*bpb
+            // beats (the bar-line beat is count 1), then start the take.
             if (ciWaitAlign_) {
                 if (barStart) {
                     ciWaitAlign_ = false;
@@ -331,9 +364,9 @@ private:
                 beginRecording();
             }
         } else if (phase_ == PH_ARMED) {
-            // Internal: the grid was reset at the tap, so the first beat (this
-            // one) is the downbeat. External: honour the quantise mode.
-            bool match = (source_ == SRC_INTERNAL) || (mode_ == MODE_BEAT) || barStart;
+            // Off-grid (fresh internal downbeat): the first beat — reset at
+            // the tap — starts the take. On a grid: honour the quantise mode.
+            bool match = !armOnGrid_ || (mode_ == MODE_BEAT) || barStart;
             if (match) {
                 startOff = (int32_t)off;
                 beginRecording();
@@ -369,6 +402,8 @@ private:
     uint32_t toNextBeat_ = 0;              // samples until the next beat fires
     uint32_t sinceBeat_ = 0;
     bool     extRun_ = false;
+    bool     internalGridRun_ = false;     // internal met-"on" grid is live (survives arms)
+    bool     armOnGrid_ = false;           // current arm rides an established grid
     bool     pendingExtBeat_ = false;
     uint32_t pendingSpb_ = 0;
     bool     pendingCancel_ = false;

@@ -369,8 +369,106 @@ static void test_external_stop_cancels_arm()
     CHECK_EQ(t.phase(), LooperTiming::PH_IDLE);
     CHECK_EQ(r.startAt, -1);              // recording never started
 
-    // with no clock running at all, a tap degrades to the manual path
-    CHECK_EQ(t.armRecord(), LooperTiming::REQ_IMMEDIATE);
+    // with no clock running any more, further taps are refused (never a
+    // surprise unsynchronised take)
+    CHECK_EQ(t.armRecord(), LooperTiming::REQ_REFUSED);
+}
+
+static void test_external_no_clock_refused()
+{
+    // sync to MIDI clock was requested but no Start ever arrived: taps must be
+    // refused outright, not degrade into an unsynchronised recording
+    LooperTiming t;
+    t.setMode(LooperTiming::MODE_BAR);
+    t.setSource(LooperTiming::SRC_MIDI);
+    t.setSamplesPerBeat(22016);
+    t.setCapacity(8000000);
+    CHECK_EQ(t.armRecord(), LooperTiming::REQ_REFUSED);
+    CHECK_EQ(t.phase(), LooperTiming::PH_IDLE);
+    Run r(t);
+    r.run(50);
+    CHECK_EQ(r.startAt, -1);
+
+    // ...and again after the clock ran and then was lost (timeout path calls
+    // extStop, same as a MIDI Stop)
+    t.extStart();
+    t.extBeat(22016);
+    r.run(10);
+    t.extStop();
+    CHECK_EQ(t.armRecord(), LooperTiming::REQ_REFUSED);
+
+    // a new Start makes arming work again
+    t.extStart();
+    CHECK_EQ(t.armRecord(), LooperTiming::REQ_ACCEPTED);
+}
+
+static void test_internal_established_grid_arm()
+{
+    // met "on": the metronome grid runs while idle; arming rides it — the
+    // take starts on the grid's next boundary and the click never shifts
+    const uint32_t SPB = 22050;
+    LooperTiming t;
+    t.setMode(LooperTiming::MODE_BEAT);
+    t.setMetronome(LooperTiming::MET_ON);
+    t.setSamplesPerBeat(SPB);
+    t.setCountInBars(0);
+    t.setCapacity(8000000);
+    Run r(t);
+    r.run(400);                           // grid establishes at r.now == 0; ~2 beats pass
+    CHECK(r.clicks.size() >= 2);
+    uint64_t armAt = r.now;               // mid-beat 3
+    CHECK_EQ(t.armRecord(), LooperTiming::REQ_ACCEPTED);
+    CHECK(r.until([&] { return r.startAt >= 0; }, 2000));
+    CHECK((uint64_t)r.startAt > armAt);   // NOT immediate: waits for the boundary
+    CHECK_EQ((uint64_t)r.startAt % SPB, 0);
+    CHECK_EQ((uint64_t)r.startAt, 3 * (uint64_t)SPB);     // the next grid beat
+    for (size_t i = 0; i < r.clicks.size(); i++)          // clicks never shifted
+        CHECK_EQ(r.clicks[i] % SPB, 0);
+
+    // bar mode: same, but the start waits for the grid's next bar line
+    LooperTiming t2;
+    t2.setMode(LooperTiming::MODE_BAR);
+    t2.setMetronome(LooperTiming::MET_ON);
+    t2.setBeatsPerBar(4);
+    t2.setSamplesPerBeat(SPB);
+    t2.setCountInBars(0);
+    t2.setCapacity(8000000);
+    Run r2(t2);
+    r2.run(400);                          // mid-bar 1
+    CHECK_EQ(t2.armRecord(), LooperTiming::REQ_ACCEPTED);
+    CHECK(r2.until([&] { return r2.startAt >= 0; }, 4000));
+    CHECK_EQ((uint64_t)r2.startAt, 4 * (uint64_t)SPB);    // the next bar line
+
+    // count-in on an established grid: align to the next bar line, count one
+    // bar, record from the bar line after it
+    LooperTiming t3;
+    t3.setMode(LooperTiming::MODE_BAR);
+    t3.setMetronome(LooperTiming::MET_ON);
+    t3.setBeatsPerBar(4);
+    t3.setSamplesPerBeat(SPB);
+    t3.setCountInBars(1);
+    t3.setCapacity(8000000);
+    Run r3(t3);
+    r3.run(400);
+    CHECK_EQ(t3.armRecord(), LooperTiming::REQ_ACCEPTED);
+    CHECK(r3.until([&] { return r3.startAt >= 0; }, 8000));
+    CHECK_EQ((uint64_t)r3.startAt, 8 * (uint64_t)SPB);    // bar 2 line + 1 bar
+
+    // cancelling an arm must not stop the idle metronome
+    LooperTiming t4;
+    t4.setMode(LooperTiming::MODE_BEAT);
+    t4.setMetronome(LooperTiming::MET_ON);
+    t4.setSamplesPerBeat(SPB);
+    t4.setCountInBars(0);
+    t4.setCapacity(8000000);
+    Run r4(t4);
+    r4.run(10);
+    t4.armRecord();
+    t4.cancel();
+    size_t before = r4.clicks.size();
+    r4.run(SPB / 128 + 2);                // one more beat's worth
+    CHECK(r4.clicks.size() > before);     // still clicking, unshifted
+    CHECK_EQ(r4.clicks.back() % SPB, 0);
 }
 
 static void test_external_beat_dedupe()
@@ -475,6 +573,8 @@ int main()
     test_external_count_in();
     test_external_fixed_bars_and_clock_loss();
     test_external_stop_cancels_arm();
+    test_external_no_clock_refused();
+    test_internal_established_grid_arm();
     test_external_beat_dedupe();
     test_midiclock_tempo_and_beats();
     test_midiclock_stop_continue();
