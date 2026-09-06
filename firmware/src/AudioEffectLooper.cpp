@@ -31,6 +31,7 @@ bool AudioEffectLooper::begin()
     capacity = bytesPer / sizeof(int16_t);
     cur = bufA;
     alt = bufB;
+    timing_.setCapacity(capacity);
     return true;
 }
 
@@ -41,6 +42,8 @@ const char *AudioEffectLooper::stateName() const
     case PLAYING:     return "playing";
     case OVERDUBBING: return "overdubbing";
     case STOPPED:     return "stopped";
+    case ARMED:       return "armed";
+    case COUNT_IN:    return "countin";
     default:          return hasLoop() ? "stopped" : "empty";
     }
 }
@@ -87,6 +90,7 @@ const int16_t *AudioEffectLooper::exportData(uint32_t &len) const
 void AudioEffectLooper::handleCommand(uint8_t cmd)
 {
     if (cmd & CMD_IMPORT) {
+        timing_.reset();               // an imported loop supersedes any armed take
         uint32_t n = importLen_;
         if (n > capacity) n = capacity;
         if (n >= 2 * RAMP) {
@@ -104,6 +108,7 @@ void AudioEffectLooper::handleCommand(uint8_t cmd)
     }
 
     if (cmd & CMD_CLEAR) {
+        timing_.reset();
         isrState = EMPTY;
         length = 0;
         pos = 0;
@@ -123,8 +128,17 @@ void AudioEffectLooper::handleCommand(uint8_t cmd)
     if (cmd & CMD_TAP_STOP) {
         switch (isrState) {
         case RECORDING:
+            timing_.notifyClosed();        // STOP always acts now, even mid-schedule
             if (pos >= MIN_LOOP) closeRecording(STOPPED);
             else { isrState = EMPTY; length = 0; pos = 0; }
+            break;
+        case ARMED:
+        case COUNT_IN:
+            // STOP is the unambiguous "never mind": abandon the armed take.
+            timing_.cancel();
+            isrState = EMPTY;
+            length = 0;
+            pos = 0;
             break;
         case PLAYING:
             isrState = STOPPING;
@@ -152,15 +166,26 @@ void AudioEffectLooper::handleCommand(uint8_t cmd)
 
     if (cmd & CMD_TAP_LOOP) {
         switch (isrState) {
-        case EMPTY:
-            isrState = RECORDING;
-            pos = 0;
-            length = 0;
-            rampPos = 0;
-            canUndo_ = false;
+        case EMPTY: {
+            // With sync on the engine schedules the start (count-in / next
+            // boundary); otherwise — or with no usable clock — record now.
+            uint8_t r = timing_.armRecord();
+            if (r == LooperTiming::REQ_ACCEPTED) {
+                isrState = (timing_.phase() == LooperTiming::PH_COUNT_IN) ? COUNT_IN : ARMED;
+                pos = 0;
+                length = 0;
+                canUndo_ = false;
+            } else if (r == LooperTiming::REQ_IMMEDIATE) {
+                startImmediateRecording();
+            }
             break;
-        case RECORDING:
-            if (pos >= MIN_LOOP) {
+        }
+        case ARMED:
+        case COUNT_IN:
+            break;                         // already armed; STOP cancels
+        case RECORDING: {
+            uint8_t r = timing_.requestStopRecord();
+            if (r == LooperTiming::REQ_IMMEDIATE && pos >= MIN_LOOP) {
 #if LOOPER_CLOSE_TO_OVERDUB
                 closeRecording(OVERDUBBING);
 #else
@@ -168,6 +193,7 @@ void AudioEffectLooper::handleCommand(uint8_t cmd)
 #endif
             }
             break;
+        }
         case PLAYING:
             isrState = OVERDUBBING;
             passRemaining = length;
@@ -203,23 +229,67 @@ void AudioEffectLooper::update()
     uint8_t cmd = __atomic_exchange_n(&pendingCmd, 0, __ATOMIC_ACQ_REL);
     if (cmd) handleCommand(cmd);
 
+    // Advance the musical clock and act on what falls inside this block.
+    applySyncStaging();
+    LooperTiming::Action act = timing_.advance(AUDIO_BLOCK_SAMPLES);
+    if (act.cancelled && (isrState == ARMED || isrState == COUNT_IN)) {
+        isrState = EMPTY;   // clock loss / MIDI Stop / config change while armed
+        length = 0;
+        pos = 0;
+    }
+    if (act.startRecordAt >= 0 && (isrState == ARMED || isrState == COUNT_IN)) {
+        startImmediateRecording();
+        recStart_ = (uint32_t)act.startRecordAt;   // partial first block, sample exact
+    }
+    bool clickMixed = false;
+
     switch (isrState) {
 
     case EMPTY:
+    case ARMED:
+    case COUNT_IN:
     case STOPPED:
         break;
 
     case RECORDING: {
-        for (uint32_t i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+        uint32_t from = recStart_;         // an armed start records a partial first block
+        recStart_ = 0;
+        uint32_t upTo = AUDIO_BLOCK_SAMPLES;
+        bool closing = false;
+        if (act.stopRecordAt >= 0 && (uint32_t)act.stopRecordAt >= from) {
+            upTo = (uint32_t)act.stopRecordAt;   // scheduled boundary close
+            closing = true;
+        }
+        for (uint32_t i = from; i < upTo; i++) {
             int32_t s = in ? in->data[i] : 0;
             if (rampPos < RAMP) {
                 s = s * (int32_t)rampPos / (int32_t)RAMP;
                 rampPos++;
             }
-            cur[pos + i] = (int16_t)s;
+            cur[pos + (i - from)] = (int16_t)s;
         }
-        pos += AUDIO_BLOCK_SAMPLES;
-        if (pos + AUDIO_BLOCK_SAMPLES > capacity) {
+        pos += upTo - from;
+        if (closing) {
+            closeRecording(PLAYING);
+            // Play the rest of this block from the head of the fresh loop, so
+            // the first pass's downbeat lands exactly on the grid.
+            uint32_t rem = AUDIO_BLOCK_SAMPLES - upTo;
+            if (rem && length) {
+                uint32_t run = rem < length ? rem : length;
+                audio_block_t *out = allocate();
+                if (out) {
+                    memset(out->data, 0, upTo * sizeof(int16_t));
+                    memcpy(out->data + upTo, cur, run * sizeof(int16_t));
+                    if (act.clickAt >= 0) startClick((uint32_t)act.clickAt, act.accent);
+                    mixClickInto(out->data);
+                    clickMixed = true;
+                    transmit(out);
+                    release(out);
+                }
+                pos = run < length ? run : 0;
+            }
+        } else if (pos + AUDIO_BLOCK_SAMPLES > capacity) {
+            timing_.notifyClosed();
             closeRecording(PLAYING); // buffer full — close the loop automatically
         }
         break;
@@ -395,6 +465,15 @@ void AudioEffectLooper::update()
 
     if (in) release(in);
 
+    // Metronome click — audible only while no loop audio is playing (once the
+    // loop runs, the loop itself is the timing reference).
+    if (!clickMixed && clickEligible(isrState)) {
+        if (act.clickAt >= 0) startClick((uint32_t)act.clickAt, act.accent);
+        if (clickRemain_) emitClickBlock();
+    } else if (!clickEligible(isrState)) {
+        clickRemain_ = 0;                  // a click tail never bleeds into playback
+    }
+
     isrPublic_ = isrState;
     uint8_t ps = isrState;
     if (ps == DUB_FINALIZE) ps = PLAYING; // the tap-out already happened, musically
@@ -402,4 +481,90 @@ void AudioEffectLooper::update()
     publicState = ps;
     lengthSamples_ = length;
     posSamples_ = pos;
+    syncPhase_ = (uint8_t)timing_.phase();
+    syncBeat_ = timing_.currentBeat();
+    syncSpb_ = timing_.samplesPerBeat();
+}
+
+void AudioEffectLooper::startImmediateRecording()
+{
+    isrState = RECORDING;
+    pos = 0;
+    length = 0;
+    rampPos = 0;
+    canUndo_ = false;
+    recStart_ = 0;
+}
+
+// Copy staged sync settings and external clock events into the engine. All
+// engine calls happen here, in the ISR — the UI/MIDI threads only bump the
+// sequence bytes, so there are no cross-thread races inside LooperTiming.
+void AudioEffectLooper::applySyncStaging()
+{
+    uint8_t s = cfgSeq_;
+    if (s != cfgSeqSeen_) {
+        cfgSeqSeen_ = s;
+        timing_.setMode(cfgMode_);
+        timing_.setSource(cfgSource_);
+        timing_.setSamplesPerBeat(cfgSpb_);
+        timing_.setCountInBars(cfgCountIn_);
+        timing_.setRecordBars(cfgBars_);
+        timing_.setMetronome(cfgMet_);
+    }
+    s = extEvtSeq_;
+    if (s != extEvtSeqSeen_) {
+        extEvtSeqSeen_ = s;
+        switch (extEvt_) {
+        case 1: timing_.extStart(); break;
+        case 2: timing_.extContinue(); break;
+        case 3: timing_.extStop(); break;
+        default: break;
+        }
+    }
+    s = extBeatSeq_;
+    if (s != extBeatSeqSeen_) {
+        extBeatSeqSeen_ = s;
+        timing_.extBeat(extSpb_);
+    }
+}
+
+// The click is a short decaying square burst — integer math, no tables, no
+// allocation. ~1.57 kHz for the bar accent, ~1.05 kHz for other beats.
+void AudioEffectLooper::startClick(uint32_t offset, bool accent)
+{
+    clickRemain_ = CLICK_LEN;
+    clickStart_ = offset < AUDIO_BLOCK_SAMPLES ? offset : 0;
+    clickHalf_ = accent ? 14 : 21;
+    clickPhase_ = 0;
+    clickSign_ = 1;
+    clickAmp_ = (int32_t)(accent ? 26000 : 20000) * (int32_t)(uint16_t)cfgMetVol_ / 256;
+}
+
+void AudioEffectLooper::mixClickInto(int16_t *data)
+{
+    uint32_t i = clickStart_;
+    clickStart_ = 0;
+    for (; i < AUDIO_BLOCK_SAMPLES && clickRemain_; i++, clickRemain_--) {
+        int32_t s = clickSign_ * (clickAmp_ * (int32_t)clickRemain_ / (int32_t)CLICK_LEN);
+        data[i] = sat16((int32_t)data[i] + s);
+        if (++clickPhase_ >= clickHalf_) {
+            clickPhase_ = 0;
+            clickSign_ = -clickSign_;
+        }
+    }
+}
+
+void AudioEffectLooper::emitClickBlock()
+{
+    audio_block_t *out = allocate();
+    if (!out) {                            // pool empty: drop this slice of the click
+        uint32_t n = AUDIO_BLOCK_SAMPLES - clickStart_;
+        clickRemain_ = clickRemain_ > n ? clickRemain_ - n : 0;
+        clickStart_ = 0;
+        return;
+    }
+    memset(out->data, 0, sizeof(out->data));
+    mixClickInto(out->data);
+    transmit(out);
+    release(out);
 }

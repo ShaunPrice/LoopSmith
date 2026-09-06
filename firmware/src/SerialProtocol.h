@@ -13,7 +13,9 @@ public:
 
 private:
     void handleLine(char *line);
+    void handleSync(int argc, char **argv);
     void emitStatus();
+    void emitSync();
     void emitPong();
     void emitPresets();
     void emitEventsIfChanged();

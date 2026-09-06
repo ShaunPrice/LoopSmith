@@ -8,11 +8,13 @@
 #include "PatchManager.h"
 #include "PresetStore.h"
 #include "Actions.h"
+#include "MidiClockIn.h"
 
 class Pedal {
 public:
     PatchManager patch;
     PresetStore  store;
+    MidiClockIn  midiClock;     // USB MIDI clock follower (idle in serial-only builds)
 
     int    presetIndex = -1;    // -1 = none loaded (or a live-applied patch)
     String lastWarnings;
