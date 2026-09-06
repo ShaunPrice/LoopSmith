@@ -5563,6 +5563,7 @@ const scoreCtl = { speed: 1, transpose: 0, mute: new Set(), solo: new Set(), a: 
 function createPlayerCore(events, opts) {
   const core = {
     i: 0, held: new Map(),                       // 'ch/srcNote' -> note actually sent
+    sustain: new Set(),                          // 0-based channels with the damper (CC64) down
     mute: new Set((opts && opts.mute) || []), solo: new Set((opts && opts.solo) || []),
     transpose: (opts && opts.transpose) | 0,
     audible(ch0) { const c = ch0 + 1; return core.solo.size ? core.solo.has(c) : !core.mute.has(c); },
@@ -5584,6 +5585,10 @@ function createPlayerCore(events, opts) {
         core.held.delete(key);
         return [m[0], sent, m.length > 2 ? m[2] : 0];
       }
+      if (st === 0xB0 && m.length > 2 && m[1] === 64) {   // damper pedal: note-offs alone
+        if (m[2] >= 64) core.sustain.add(ch);             // cannot end a note while it is
+        else core.sustain.delete(ch);                     // down — release() must lift it
+      }
       return Array.from(m);                      // CC / program / bend pass through
     },
     advance(to) {                                // everything due up to source time `to`
@@ -5596,7 +5601,10 @@ function createPlayerCore(events, opts) {
       return out;
     },
     release() {                                  // stop / seek / loop boundary: nothing may hang
+      // sustain up FIRST — a note-off while the damper is down keeps sounding
       const out = [];
+      for (let ch = 0; ch < 16; ch++) out.push([0xB0 | ch, 64, 0]);
+      core.sustain.clear();
       for (const [key, sent] of core.held) out.push([0x80 | +key.split('/')[0], sent, 0]);
       core.held.clear();
       for (let ch = 0; ch < 16; ch++) out.push([0xB0 | ch, 123, 0]);
@@ -5609,7 +5617,11 @@ function createPlayerCore(events, opts) {
       const out = [];
       for (const [key, sent] of core.held) {
         const ch = +key.split('/')[0];
-        if (!core.audible(ch)) { out.push([0x80 | ch, sent, 0]); core.held.delete(key); }
+        if (!core.audible(ch)) {
+          if (core.sustain.has(ch)) { out.push([0xB0 | ch, 64, 0]); core.sustain.delete(ch); }
+          out.push([0x80 | ch, sent, 0]);
+          core.held.delete(key);
+        }
       }
       return out;
     },
@@ -5627,6 +5639,8 @@ function createPlayerCore(events, opts) {
       for (const [ch, p] of prog) out.push([0xC0 | ch, p]);
       for (const [, [ch, cc, v]] of ccs) out.push([0xB0 | ch, cc, v]);
       for (const [ch, [lo, hi]] of bend) out.push([0xE0 | ch, lo, hi]);
+      // the chase may have put the damper back down — keep tracking honest
+      core.sustain = new Set([...ccs.values()].filter(([, cc, v]) => cc === 64 && v >= 64).map(([ch]) => ch));
       core.i = j;
       return out;
     },
@@ -7006,6 +7020,9 @@ function scorePos() {
 /* ---- score playback controls (NEW): pushing scoreCtl to whichever player is
    playing, and seeking. The bridge gets explicit validated API calls
    (/api/midi/params, /api/midi/seek); the local player is told directly. ---- */
+/** STABLE integration point for the universal transport bar: pass this
+ *  object with any /api/midi/play request (and after any control change,
+ *  through /api/midi/params) so playback starts with the score's controls. */
 function scoreCtlParams() {
   const p = { speed: scoreCtl.speed, transpose: scoreCtl.transpose,
               mute: [...scoreCtl.mute].sort((a, b) => a - b), solo: [...scoreCtl.solo].sort((a, b) => a - b),
@@ -7190,7 +7207,10 @@ const SONG_LIMITS = {
   midiBytes: 2 * 1024 * 1024, midiCount: 64,
   loopBytes: MAX_LOOP_BYTES, loopCount: 32,
   presetCount: 64, presetText: 64 * 1024,
-  total: 64 * 1024 * 1024, name: 80, title: 120,
+  total: 64 * 1024 * 1024,               // decoded payload cap (what validation sums)
+  json: 96 * 1024 * 1024,                // raw file cap: total × 4/3 base64 overhead + headroom,
+                                         // so nothing the exporter writes is refused by size on open
+  name: 80, title: 120,
 };
 
 function b64FromBytes(u8) {
@@ -7221,7 +7241,7 @@ function validatePlaybackPrefs(p, errors, where) {
   const bad = m => { errors.push(where + ': ' + m); };
   if (typeof p !== 'object' || p === null) { bad('not an object'); return; }
   if (p.file !== undefined && typeof p.file !== 'string') bad('file must be a name');
-  if (p.speed !== undefined && !(typeof p.speed === 'number' && p.speed >= PLAY_SPEED_MIN && p.speed <= PLAY_SPEED_MAX))
+  if (p.speed !== undefined && !(Number.isFinite(p.speed) && p.speed >= PLAY_SPEED_MIN && p.speed <= PLAY_SPEED_MAX))
     bad(`speed must be a number between ${PLAY_SPEED_MIN} and ${PLAY_SPEED_MAX}`);
   if (p.transpose !== undefined && !(Number.isInteger(p.transpose) && Math.abs(p.transpose) <= PLAY_TRANSPOSE_MAX))
     bad(`transpose must be a whole number within ±${PLAY_TRANSPOSE_MAX}`);
@@ -7231,8 +7251,8 @@ function validatePlaybackPrefs(p, errors, where) {
   const hasA = p.a !== undefined && p.a !== null, hasB = p.b !== undefined && p.b !== null;
   if (hasA !== hasB) bad('the repeat passage needs both A and B');
   else if (hasA) {
-    if (!(typeof p.a === 'number' && typeof p.b === 'number' && p.a >= 0 && p.b - p.a >= 0.05))
-      bad('the repeat passage must be at least 0.05 s and A before B');
+    if (!(Number.isFinite(p.a) && Number.isFinite(p.b) && p.a >= 0 && p.b - p.a >= 0.05))
+      bad('the repeat passage must be finite, at least 0.05 s, and A before B');
   }
 }
 
@@ -7251,7 +7271,7 @@ function sessionValidate(pkg) {
   data.title = typeof pkg.title === 'string' ? pkg.title.slice(0, SONG_LIMITS.title) : '';
   let total = 0;
   const nameOk = (n, exts) => typeof n === 'string' && n.length <= SONG_LIMITS.name && !n.startsWith('.') &&
-    /^[A-Za-z0-9._ -]+$/.test(n) && exts.some(e => n.toLowerCase().endsWith(e));
+    /^[A-Za-z0-9._-]+$/.test(n) && exts.some(e => n.toLowerCase().endsWith(e));
 
   const presets = pkg.presets === undefined ? [] : pkg.presets;
   if (!Array.isArray(presets)) errors.push('presets: not a list');
@@ -7289,7 +7309,7 @@ function sessionValidate(pkg) {
     try { parsed = parseSmf(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)); }
     catch (e) { errors.push(where + ': not a usable MIDI file (' + e.message + ')'); return; }
     total += bytes.length;
-    data.midi.push({ name: f.name.replace(/ /g, '_'), bytes, parsed });
+    data.midi.push({ name: f.name, bytes, parsed });
   });
 
   const loops = pkg.loops === undefined ? [] : pkg.loops;
@@ -7312,6 +7332,8 @@ function sessionValidate(pkg) {
 
   if (pkg.playback !== undefined && pkg.playback !== null) {
     validatePlaybackPrefs(pkg.playback, errors, 'playback preferences');
+    if (typeof pkg.playback.file === 'string' && !nameOk(pkg.playback.file, ['.mid', '.midi', '.smf']))
+      errors.push('playback preferences: the file name is not a usable MIDI name');
     data.playback = pkg.playback;
     if (typeof pkg.playback.file === 'string' && !data.midi.some(m => m.name === pkg.playback.file))
       warnings.push(`The playback preferences point at "${pkg.playback.file}", which this session does not carry — they will apply once a file of that name exists.`);
@@ -7345,6 +7367,14 @@ async function sessionBuild(sel) {
   const pkg = { format: SONG_FORMAT, version: SONG_VERSION, app: 'GuitarLoopSynth Studio',
                 created: new Date().toISOString(), title: sel.title || 'Song',
                 presets: [], midiFiles: [], loops: [] };
+  // the same decoded-payload bound the importer enforces, checked as we pack:
+  // nothing this exporter writes may be refused on open
+  let total = 0;
+  const grow = (n, what) => {
+    total += n;
+    if (total > SONG_LIMITS.total)
+      throw new Error(`adding ${what} takes the session past ${fmtBytes(SONG_LIMITS.total)} — untick something`);
+  };
   for (const id of sel.presets) {
     const p = store.state.presets.find(x => x.id === id);
     if (!p) continue;
@@ -7352,6 +7382,7 @@ async function sessionBuild(sel) {
     // chain-meta survive because nothing is regenerated on the way out
     pkg.presets.push({ title: p.title, fileName: p.fileName, fileNameCustom: !!p.fileNameCustom,
                        mode: p.mode, chain: p.chain, instruments: p.instruments || [], customText: p.customText });
+    grow(generateText(p).length, `preset ${p.title}`);
   }
   for (const name of sel.midi) {
     const f = scoreFiles().find(x => x.name === name);
@@ -7365,11 +7396,13 @@ async function sessionBuild(sel) {
     }
     if (!bytes) throw new Error(`${name} has no bytes to export — re-upload it first`);
     if (bytes.length > SONG_LIMITS.midiBytes) throw new Error(`${name} is ${fmtBytes(bytes.length)} — too big for a session`);
+    grow(bytes.length, name);
     pkg.midiFiles.push({ name, data: b64FromBytes(bytes) });
   }
   for (const name of sel.loops) {
     const bytes = await loopFetch(name);                      // explicit: only ticked loops leave the pedal
     if (bytes.length > SONG_LIMITS.loopBytes) throw new Error(`${name} is ${fmtBytes(bytes.length)} — too big for a session`);
+    grow(bytes.length, name);
     pkg.loops.push({ name, data: b64FromBytes(bytes) });
   }
   if (sel.playback) {
@@ -7386,12 +7419,40 @@ async function sessionBuild(sel) {
         overwriting a file, a loop or the pedal) ---- */
 async function sessionApply(data, choose) {
   const done = [], failed = [];
+  const addedPresets = new Map();              // session title -> the workspace preset object
   for (const p of data.presets) {
     if (!choose.presets.has(p.title)) continue;
-    addPreset(Object.assign({ id: uid(), updated: Date.now() }, p, { title: uniqueTitle(p.title) }));
-    done.push('preset ' + p.title);
+    const wp = Object.assign({ id: uid(), updated: Date.now() }, p, { title: uniqueTitle(p.title) });
+    addPreset(wp);
+    addedPresets.set(p.title, wp);
+    done.push('preset ' + p.title + (wp.title !== p.title ? ` (as "${wp.title}")` : ''));
+  }
+  // one imported preset may be loaded onto the pedal — explicit, and honest
+  // about failing. `apply` is live-only; the SD card is written only when the
+  // user also asked for that.
+  if (choose.pedalPreset) {
+    const wp = addedPresets.get(choose.pedalPreset);
+    if (!wp) failed.push(`pedal preset: "${choose.pedalPreset}" was not imported`);
+    else if (!link.connected) failed.push('pedal preset: the pedal is not connected — nothing was sent');
+    else {
+      try {
+        const text = generateText(wp);
+        const bytes = enc.encode(text);
+        if (bytes.length > MAX_FILE_BYTES) throw new Error(`the preset is ${bytes.length} bytes (> 16 KB)`);
+        if (!patchIsValid(text, null)) throw new Error('it fails PatchScript validation — open it in Studio to see why');
+        if (choose.pedalSave) {
+          let name = ensureFileName(wp).replace(/\s+/g, '_');
+          await sendCmd(`put ${name} ${bytes.length}`, { payload: bytes, kind: 'send' });
+          await refreshDeviceList();
+          done.push(`pedal preset "${wp.title}" written to the SD card as ${name}`);
+        }
+        await sendCmd(`apply ${bytes.length}`, { payload: bytes, kind: 'send' });
+        done.push(`pedal preset "${wp.title}" applied live`);
+      } catch (e) { failed.push(`pedal preset "${wp.title}": ${e.message}`); }
+    }
   }
   const existingMidi = scoreFiles().map(f => f.name);
+  const importedAs = new Map();                // original name -> actual name, ONLY on success
   for (const f of data.midi) {
     if (!choose.midi.has(f.name)) continue;
     const name = choose.replace ? f.name : dedupeName(f.name, existingMidi);
@@ -7405,6 +7466,7 @@ async function sessionApply(data, choose) {
           .concat([{ name, length: f.parsed.length, events: f.parsed.events, uses: midiUsage(f.parsed.events), parsed: f.parsed, bytes: f.bytes }]);
       }
       existingMidi.push(name);
+      importedAs.set(f.name, name);
       done.push('MIDI ' + name + (name !== f.name ? ` (renamed from ${f.name})` : ''));
     } catch (e) { failed.push(`MIDI ${f.name}: ${e.message}`); }
   }
@@ -7422,19 +7484,32 @@ async function sessionApply(data, choose) {
   if (data.loops.some(f => choose.loops.has(f.name))) await refreshLoops();
   if (data.playback && choose.playback) {
     const p = data.playback;
-    // choose the file FIRST: scoreSelect clears the A/B passage on a change of file
+    let fileMissed = false;
+    // choose the file FIRST: scoreSelect clears the A/B passage on a change of
+    // file. When the session carried the file, only the copy that was actually
+    // imported (under whatever name it landed) may be selected — an unrelated
+    // existing file with the same name holds different bytes.
     if (typeof p.file === 'string') {
-      const target = choose.replace ? p.file : (choose.midi.has(p.file) ? dedupeName(p.file, existingMidi.filter(n => n !== p.file)) : p.file);
-      const have = scoreFiles().some(f => f.name === p.file) ? p.file : (scoreFiles().some(f => f.name === target) ? target : null);
-      if (have) { score.file = null; scoreSelect(have); }
-      else failed.push(`playback: "${p.file}" is not among the MIDI files here — pick it in the Score panel when it is`);
+      const carried = data.midi.some(m => m.name === p.file);
+      let target = null;
+      if (carried) {
+        if (importedAs.has(p.file)) target = importedAs.get(p.file);
+        else failed.push(`playback: ${p.file} came with the session but was not imported${choose.midi.has(p.file) ? '' : ' (unticked)'} — pick a file in the Score panel yourself`);
+      } else if (scoreFiles().some(f => f.name === p.file)) {
+        target = p.file;                       // the documented missing-asset case: a file of that name is already here
+      } else {
+        failed.push(`playback: "${p.file}" is not among the MIDI files here — pick it in the Score panel when it is`);
+      }
+      if (target) { score.file = null; scoreSelect(target); }
+      else fileMissed = true;
     }
     if (p.speed !== undefined) scoreCtl.speed = p.speed;
     if (p.transpose !== undefined) scoreCtl.transpose = p.transpose;
     scoreCtl.mute = new Set(p.mute || []);
     scoreCtl.solo = new Set(p.solo || []);
-    scoreCtl.a = typeof p.a === 'number' ? p.a : null;
-    scoreCtl.b = typeof p.b === 'number' ? p.b : null;
+    // A/B marks a passage in ONE file — restore it only when that file is on show
+    scoreCtl.a = !fileMissed && typeof p.a === 'number' ? p.a : null;
+    scoreCtl.b = !fileMissed && typeof p.b === 'number' ? p.b : null;
     if (p.roll === true || p.roll === false) scoreCtl.roll = p.roll;
     if (p.loop !== undefined) { midi.loop = !!p.loop; if ($('#midiLoopChk')) $('#midiLoopChk').checked = midi.loop; }
     if ($('#scoreSpeed')) $('#scoreSpeed').value = String(scoreCtl.speed);
@@ -7532,6 +7607,8 @@ function songExportOpen() {
     try {
       const pkg = await sessionBuild(sel);
       const json = JSON.stringify(pkg);
+      if (json.length > SONG_LIMITS.json)
+        throw new Error(`the session file would be ${fmtBytes(json.length)} — the limit is ${fmtBytes(SONG_LIMITS.json)}`);
       const fname = (sanitizeFileName(sel.title).replace(/\.txt$/, '') || 'song') + '.glsong.json';
       saveBlob(new Blob([json], { type: 'application/json' }), fname);
       consoleLog('ok', `Exported ${fname} (${fmtBytes(json.length)}: ${pkg.presets.length} presets, ${pkg.midiFiles.length} MIDI, ${pkg.loops.length} loops)`);
@@ -7567,10 +7644,25 @@ function songImportOpen(text, fileName) {
   }
   for (const wmsg of v.warnings) songMsg(body, 'warn', wmsg);
   const d = v.data;
+  let pedalSel = null, pedalSave = null;
   if (d.presets.length) {
     songCat(body, 'Presets — added to the workspace (existing ones are never touched)');
     const box = document.createElement('div'); box.className = 'song-list'; body.appendChild(box);
     for (const p of d.presets) songRow(box, 'preset', p.title, p.mode === 'custom' ? 'custom routing' : 'chain', true);
+    // the song's sound, onto the pedal (NEW): one imported preset may be
+    // applied live after import — explicit, and the SD card only with its own tick
+    songCat(body, 'Pedal — the song’s sound');
+    const pb = document.createElement('div'); pb.className = 'song-list'; body.appendChild(pb);
+    if (!link.connected) songMsg(pb, 'warn', 'Connect the pedal to load one of these presets onto it after import.');
+    else {
+      pedalSel = document.createElement('select'); pedalSel.className = 'midi-sel'; pedalSel.style.width = '100%';
+      const opt = (v, label) => { const o = document.createElement('option'); o.value = v; o.textContent = label; pedalSel.appendChild(o); };
+      opt('', 'Do not touch the pedal');
+      for (const p of d.presets) opt(p.title, `Apply "${p.title}" live after import`);
+      pb.appendChild(pedalSel);
+      pedalSave = songRow(pb, 'opt', 'pedalsave', 'unticked: live only, the SD card is untouched', false, false,
+                          'Also write that preset to the pedal’s SD card');
+    }
   }
   const midiHere = scoreFiles().map(f => f.name);
   if (d.midi.length) {
@@ -7619,7 +7711,9 @@ function songImportOpen(text, fileName) {
     const picked = kind => new Set([...body.querySelectorAll(`input[data-kind="${kind}"]:checked`)].map(c => c.dataset.name));
     const choose = { presets: picked('preset'), midi: picked('midi'), loops: picked('loop'),
                      playback: !!(cPlay && cPlay.checked), switches: !!(cSw && cSw.checked), layout: !!(cLay && cLay.checked),
-                     replace: !!(cReplace && cReplace.checked) };
+                     replace: !!(cReplace && cReplace.checked),
+                     pedalPreset: (pedalSel && pedalSel.value) || null, pedalSave: !!(pedalSave && pedalSave.checked) };
+    if (choose.pedalPreset && !choose.presets.has(choose.pedalPreset)) choose.presets.add(choose.pedalPreset);
     go.disabled = true; msg.replaceChildren(); songMsg(msg, 'ok', 'Applying…');
     const res = await sessionApply(d, choose);
     for (const line of res.done) consoleLog('ok', 'Session: ' + line);
@@ -7652,7 +7746,7 @@ function songBuildSection() {
   $('#songImportInput').addEventListener('change', async ev => {
     const f = ev.target.files[0]; ev.target.value = '';
     if (!f) return;
-    if (f.size > SONG_LIMITS.total) { consoleLog('err', `${f.name} is ${fmtBytes(f.size)} — sessions are capped at ${fmtBytes(SONG_LIMITS.total)}`); return; }
+    if (f.size > SONG_LIMITS.json) { consoleLog('err', `${f.name} is ${fmtBytes(f.size)} — session files are capped at ${fmtBytes(SONG_LIMITS.json)}`); return; }
     songImportOpen(await f.text(), f.name);
   });
 }

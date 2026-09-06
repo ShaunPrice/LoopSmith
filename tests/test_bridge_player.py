@@ -103,6 +103,24 @@ class TestValidateParams(unittest.TestCase):
         self.bad({"mute": "1,2"})
         self.bad({"solo": [1.5]})
 
+    def test_nonfinite_bool_and_fractional_refused(self):
+        nan, inf = float("nan"), float("inf")
+        self.bad({"speed": nan})
+        self.bad({"speed": inf})
+        self.bad({"speed": True})                          # bool is an int in Python; not a speed
+        self.bad({"transpose": 1.5})                       # fractional semitones
+        self.bad({"transpose": nan})
+        self.bad({"transpose": True})
+        self.bad({"mute": [True]})                         # True == 1, but it is not a channel
+        self.bad({"a": nan, "b": 2.0})
+        self.bad({"a": 0.0, "b": inf})
+        self.bad({"a": 0.0, "b": -inf})
+        self.bad({"position_s": nan})
+        self.bad({"position_s": inf})
+        self.bad({"position_s": True})
+        # integral floats are fine (JSON often carries 2.0) — matching the editor
+        self.assertEqual(self.ok({"transpose": 2.0})["transpose"], 2)
+
     def test_ab_pairing_and_range(self):
         self.bad({"a": 1.0})                              # A without B
         self.bad({"b": 1.0})
@@ -172,9 +190,40 @@ class TestPlayerLogic(unittest.TestCase):
         lg = self.logic()
         lg.advance(0.1)
         out = lg.release()
-        self.assertEqual(out[0], bytes((0x80, 60, 0)))
+        # sustain (CC64) comes up on every channel BEFORE any note-off —
+        # a note-off under a down damper keeps sounding
+        for i in range(16):
+            self.assertEqual((out[i][0] & 0xF0, out[i][1], out[i][2]), (0xB0, 64, 0))
+        self.assertEqual(out[16], bytes((0x80, 60, 0)))
         self.assertEqual(sum(1 for m in out if (m[0] & 0xF0) == 0xB0 and m[1] == 123), 16)
         self.assertEqual(lg.held, {})
+
+    def test_sustained_notes_cannot_survive_stop_or_mute(self):
+        lg = self.logic(build_smf([
+            (0, 0xB0, 64, 127),                            # damper down on ch1
+            (0, 0x90, 60, 90), (240, 0x80, 60, 0),         # struck and "released" under sustain
+            (240, 0x90, 62, 90), (960, 0x80, 62, 0),
+        ]))
+        lg.advance(0.6)                                    # damper down, D4 (0.5 s) held
+        self.assertIn(0, lg.sustain)
+        offs = lg.set_filters(mute=[1])                    # muting lifts the damper first
+        self.assertEqual(offs[0], bytes((0xB0, 64, 0)))
+        self.assertEqual(offs[1], bytes((0x80, 62, 0)))
+        self.assertNotIn(0, lg.sustain)
+
+    def test_seek_restores_sustain_state(self):
+        lg = self.logic(build_smf([
+            (0, 0xB0, 64, 127),
+            (0, 0x90, 60, 90), (480, 0x80, 60, 0),
+            (480, 0xB0, 64, 0),                            # damper up at 1.0 s
+            (0, 0x90, 62, 90), (480, 0x80, 62, 0),
+        ]))
+        into = lg.seek(0.7)                                # damper still down there
+        self.assertTrue(any((m[0] & 0xF0) == 0xB0 and m[1] == 64 and m[2] == 127 for m in into))
+        self.assertIn(0, lg.sustain)
+        past = lg.seek(1.2)                                # damper is up there
+        self.assertNotIn(0, lg.sustain)
+        self.assertFalse(any((m[0] & 0xF0) == 0xB0 and m[1] == 64 and m[2] >= 64 for m in past))
 
     def test_seek_releases_and_chases(self):
         lg = self.logic(build_smf([
@@ -184,7 +233,7 @@ class TestPlayerLogic(unittest.TestCase):
         ]))
         lg.advance(0.1)                                    # C4 sounding
         out = lg.seek(0.7)
-        self.assertEqual(out[0], bytes((0x80, 60, 0)))     # held released first
+        self.assertEqual(out[16], bytes((0x80, 60, 0)))    # held released (after the CC64 sweep)
         self.assertIn(bytes((0xC0, 12)), out)              # program restored
         self.assertIn(bytes((0xB0, 7, 99)), out)           # latest CC7 wins
         self.assertIn(bytes((0xE0, 0, 96)), out)           # bend restored
@@ -236,6 +285,31 @@ class TestAsyncPlayer(unittest.TestCase):
                 self.assertEqual(len(ons), 3)
                 # every note ends: explicit offs plus the all-notes-off sweep
                 self.assertTrue(any((m[0] & 0xF0) == 0xB0 and m[1] == 123 for m in sent))
+        self.run_async(go())
+
+    def test_play_validates_against_the_real_length_without_stopping(self):
+        async def go():
+            with tempfile.TemporaryDirectory() as tmp:
+                link, _ = self.make_link(tmp, SIMPLE)          # SIMPLE is 1.5 s long
+                ok, msg = await link.play("t.mid", loop=True, params={"speed": 0.5})
+                self.assertTrue(ok, msg)
+                # a refused play — b beyond the file — must leave the current
+                # playback running (no silent stop, no empty A/B cycles later)
+                for bad in ({"a": 0.0, "b": 99.0},             # beyond the file
+                            {"position_s": 99.0},
+                            {"speed": float("inf")},
+                            {"transpose": 1.5}):
+                    ok, msg = await link.play("t.mid", loop=False, params=bad)
+                    self.assertFalse(ok, str(bad))
+                    st = link.status()
+                    self.assertTrue(st["playing"], "still playing after refusing %s" % (bad,))
+                    self.assertTrue(st["loop"])
+                    self.assertEqual(st["speed"], 0.5, "old parameters untouched")
+                # a good in-range A/B on the same call works
+                ok, msg = await link.play("t.mid", loop=False, params={"a": 0.2, "b": 1.0})
+                self.assertTrue(ok, msg)
+                self.assertEqual((link.status()["a"], link.status()["b"]), (0.2, 1.0))
+                await link.stop()
         self.run_async(go())
 
     def test_bad_names_and_files_refused(self):

@@ -2,8 +2,11 @@
  * (pedal-less) bridge, over the Chrome DevTools protocol. No dependencies —
  * Node ≥ 22 has fetch and a WebSocket client built in.
  *
- * Setup (two terminals, or backgrounded):
- *   HOME=/tmp/gls-home python3 pi/looper_bridge.py --http 127.0.0.1:8093 --storage /tmp/nowhere
+ * Setup (two terminals, or backgrounded). tests/dev_bridge.py is the ONLY
+ * supported way to run a bridge for this test: it pins the MIDI folder to a
+ * temp dir and disables hardware auto-detection, so it can never attach a
+ * real Teensy or touch ~/looper/midi (and HOME is left alone):
+ *   python3 tests/dev_bridge.py
  *   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
  *       --headless=new --remote-debugging-port=9222 --user-data-dir=/tmp/gls-cdp about:blank
  *   node tests/ui_smoke.mjs

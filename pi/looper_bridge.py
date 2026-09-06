@@ -42,6 +42,7 @@ import glob
 import hashlib
 import hmac
 import json
+import math
 import os
 import shutil
 import struct
@@ -847,42 +848,48 @@ PLAY_SPEED_MIN, PLAY_SPEED_MAX = 0.25, 4.0
 PLAY_TRANSPOSE_MAX = 24         # semitones either way
 
 
+def _finite_number(v):
+    """A real, finite number. bool is an int in Python, but True is not a speed."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
 def validate_midi_params(req, length=None):
     """Validate the playback-parameter fields of /api/midi/play and
     /api/midi/params. Returns (params, None) with only the keys that were
     present, or (None, message). Nothing is applied unless everything is
-    valid — a bad request changes no state."""
+    valid — a bad request changes no state. NaN/Infinity, booleans and
+    fractional transposes are refused (matching the editor's rules)."""
     if not isinstance(req, dict):
         return None, "parameters must be an object"
     out = {}
     if "speed" in req:
-        try:
-            v = float(req["speed"])
-        except (TypeError, ValueError):
+        v = req["speed"]
+        if not _finite_number(v):
             return None, "speed must be a number"
         if not (PLAY_SPEED_MIN <= v <= PLAY_SPEED_MAX):
             return None, "speed must be between %s and %s" % (PLAY_SPEED_MIN, PLAY_SPEED_MAX)
-        out["speed"] = v
+        out["speed"] = float(v)
     if "transpose" in req:
-        try:
-            v = int(req["transpose"])
-        except (TypeError, ValueError):
-            return None, "transpose must be an integer"
+        v = req["transpose"]
+        if not _finite_number(v) or float(v) != int(v):
+            return None, "transpose must be a whole number of semitones"
+        v = int(v)
         if abs(v) > PLAY_TRANSPOSE_MAX:
             return None, "transpose must be within +/-%d semitones" % PLAY_TRANSPOSE_MAX
         out["transpose"] = v
     for key in ("mute", "solo"):
         if key in req:
             v = req[key]
-            if not isinstance(v, list) or not all(isinstance(c, int) and 1 <= c <= 16 for c in v):
+            if not isinstance(v, list) or not all(
+                    isinstance(c, int) and not isinstance(c, bool) and 1 <= c <= 16 for c in v):
                 return None, key + " must be a list of channel numbers 1-16"
             out[key] = sorted(set(v))
     a = req.get("a") if "a" in req else None
     b = req.get("b") if "b" in req else None
     if "a" in req or "b" in req:
         for name, v in (("a", a), ("b", b)):
-            if v is not None and not isinstance(v, (int, float)):
-                return None, name + " must be a number of seconds or null"
+            if v is not None and not _finite_number(v):
+                return None, name + " must be a finite number of seconds or null"
             if v is not None and (v < 0 or (length is not None and v > length + 0.001)):
                 return None, name + " is outside the file"
         if (a is None) != (b is None):
@@ -891,13 +898,12 @@ def validate_midi_params(req, length=None):
             return None, "the repeat passage must be at least 0.05 s long"
         out["a"], out["b"] = a, b
     if "position_s" in req:
-        try:
-            v = float(req["position_s"])
-        except (TypeError, ValueError):
+        v = req["position_s"]
+        if not _finite_number(v):
             return None, "position_s must be a number"
         if v < 0 or (length is not None and v > length + 0.001):
             return None, "position_s is outside the file"
-        out["position_s"] = v
+        out["position_s"] = float(v)
     return out, None
 
 
@@ -912,6 +918,7 @@ class MidiPlayerLogic:
         self.length = length
         self.i = 0
         self.held = {}                  # (ch, source note) -> note actually sent
+        self.sustain = set()            # 0-based channels with the damper (CC64) down
         self.mute = set()               # 1-based channels
         self.solo = set()
         self.transpose = 0
@@ -939,6 +946,11 @@ class MidiPlayerLogic:
             if sent is None:
                 return None                                        # its note-on never sounded
             return bytes((msg[0], sent, msg[2] if len(msg) > 2 else 0))
+        if st == 0xB0 and len(msg) > 2 and msg[1] == 64:           # damper pedal: note-offs
+            if msg[2] >= 64:                                       # alone cannot end a note
+                self.sustain.add(ch)                               # while it is down, so the
+            else:                                                  # release path must lift it
+                self.sustain.discard(ch)
         return bytes(msg)               # CC / program / bend / aftertouch pass through
 
     def advance(self, to):
@@ -952,17 +964,21 @@ class MidiPlayerLogic:
         return out
 
     def release(self):
-        """Note-offs for whatever is sounding, plus all-notes-off as a backstop.
-        Sent at every stop, seek and loop boundary so nothing hangs."""
-        out = [bytes((0x80 | ch, sent, 0)) for (ch, _src), sent in self.held.items()]
+        """Silence everything at a stop, seek or loop boundary. Sustain (CC64)
+        comes up FIRST — a note-off while the damper is down keeps sounding —
+        then the note-offs, then all-notes-off as a backstop."""
+        out = [bytes((0xB0 | ch, 64, 0)) for ch in range(16)]
+        self.sustain.clear()
+        out.extend(bytes((0x80 | ch, sent, 0)) for (ch, _src), sent in self.held.items())
         self.held.clear()
         out.extend(bytes((0xB0 | ch, 123, 0)) for ch in range(16))
         return out
 
     def set_filters(self, mute=None, solo=None, transpose=None):
         """Change mute/solo/transpose live. Returns note-offs for held notes the
-        new filters silence; already-sounding notes keep their pitch (their offs
-        use the note that was actually sent)."""
+        new filters silence (lifting a down damper first, or the offs would not
+        end anything); already-sounding notes keep their pitch (their offs use
+        the note that was actually sent)."""
         if mute is not None:
             self.mute = set(mute)
         if solo is not None:
@@ -972,6 +988,9 @@ class MidiPlayerLogic:
         out = []
         for (ch, src), sent in list(self.held.items()):
             if not self._audible(ch):
+                if ch in self.sustain:
+                    out.append(bytes((0xB0 | ch, 64, 0)))
+                    self.sustain.discard(ch)
                 out.append(bytes((0x80 | ch, sent, 0)))
                 del self.held[(ch, src)]
         return out
@@ -996,6 +1015,8 @@ class MidiPlayerLogic:
         out.extend(bytes((0xC0 | ch, p)) for ch, p in sorted(prog.items()))
         out.extend(bytes((0xB0 | ch, cc, v)) for (ch, cc), v in sorted(ccs.items()))
         out.extend(bytes((0xE0 | ch, lo, hi)) for ch, (lo, hi) in sorted(bend.items()))
+        # the chase may have put the damper back down — keep tracking honest
+        self.sustain = {ch for (ch, cc), v in ccs.items() if cc == 64 and v >= 64}
         self.i = j
         return out
 
@@ -1167,25 +1188,36 @@ class MidiLink:
         return out
 
     async def play(self, name, loop=False, params=None):
-        await self.stop()
+        """Load, validate, then start. The whole request — file AND playback
+        parameters, checked against the actual file length — must be good
+        before the current playback is stopped: a refused play changes
+        nothing."""
         if not name or "/" in name or name.startswith("."):
             return False, "bad file name"
         path = os.path.join(self.midi_dir(), name)
         try:
-            smf = SmfFile(open(path, "rb").read())
+            with open(path, "rb") as f:
+                smf = SmfFile(f.read())
         except (OSError, ValueError, struct.error, IndexError) as e:
             return False, f"cannot read {name}: {e}"
         if not smf.events:
             return False, "the file has no notes"
-        self.play_file, self.play_loop, self.play_length = name, bool(loop), max(smf.length, 0.05)
+        length = max(smf.length, 0.05)
+        checked = None
+        if params:
+            checked, err = validate_midi_params(params, length)
+            if err:
+                return False, err
+        await self.stop()
+        self.play_file, self.play_loop, self.play_length = name, bool(loop), length
         self.logic = MidiPlayerLogic(smf.events, self.play_length)
         self.play_speed, self.play_a, self.play_b = 1.0, None, None
         self._src, self._anchor = 0.0, time.monotonic()
         self._wake = asyncio.Event()
         start = 0.0
-        if params:                                             # pre-validated by the route
-            start = params.pop("position_s", 0.0)
-            self._apply_params(params)
+        if checked:
+            start = checked.pop("position_s", 0.0)
+            self._apply_params(checked)
         self.player = asyncio.ensure_future(self._run(start))
         return True, f"{name}: {smf.length:.1f} s, {len(smf.events)} events"
 
@@ -1862,13 +1894,11 @@ class Server:
                 await self._json(w, {"ok": False, "message": "bad JSON"}, "400 Bad Request")
                 return
             # Score playback controls (NEW): the play request may carry initial
-            # speed / transpose / mute / solo / A-B / start position. Validated
-            # before anything starts; a bad field refuses the whole request.
-            params, err = validate_midi_params(req)
-            if err:
-                await self._json(w, {"ok": False, "message": err}, "400 Bad Request")
-                return
-            ok, msg = await self.midi.play(str(req.get("file", "")), bool(req.get("loop")), params)
+            # speed / transpose / mute / solo / A-B / start position. play()
+            # validates them against the ACTUAL file's length before stopping
+            # whatever is currently playing — a bad request changes nothing.
+            params = {k: req[k] for k in ("speed", "transpose", "mute", "solo", "a", "b", "position_s") if k in req}
+            ok, msg = await self.midi.play(str(req.get("file", "")), bool(req.get("loop")), params or None)
             await self._json(w, {"ok": ok, "message": msg})
             return
         # ---- score playback controls (NEW): live seek + parameter changes ----
