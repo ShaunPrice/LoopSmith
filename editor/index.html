@@ -577,6 +577,34 @@ path.sc-rest{fill:none;stroke:var(--muted,#7c8494)}
 .ed-actions .loop-in{margin:0;flex:1;min-width:180px}
 .btn.toggle.active{border-color:var(--accent);color:var(--accent);background:#2a2118}
 #edInfo{font-family:var(--mono);font-size:10.5px}
+
+/* ============================================================================
+   12. Score playback controls + piano roll + song sessions (NEW)
+   ========================================================================== */
+#scoreBox svg{cursor:pointer}
+.sc-ms{cursor:pointer}
+.sc-ms rect{fill:none;stroke:var(--muted,#7c8494);stroke-width:.8;opacity:.6}
+.sc-ms text{fill:var(--muted,#7c8494);font-size:9px;text-anchor:middle;font-weight:600}
+.sc-ms:hover rect{opacity:1}
+.sc-ms.on rect{fill:var(--accent,#5b8cff);stroke:var(--accent,#5b8cff);opacity:.9}
+.sc-ms.on text{fill:#0d0f13}
+.sc-ab{fill:var(--accent,#5b8cff);opacity:.13;pointer-events:none}
+.sc-ab-lbl{fill:var(--accent,#5b8cff);font-size:9px;font-weight:700;pointer-events:none}
+.sc-lane{fill:var(--card,#171a21);opacity:.45}
+.sc-rollnote{stroke:none}
+#scoreCtlRow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px}
+#scoreCtlRow select,#scoreCtlRow input[type=number]{width:auto}
+#scoreTrans{width:56px}
+#songSec .actions-row{margin-top:6px}
+.song-list{max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px;margin:4px 0 10px}
+.song-list label{display:flex;align-items:center;gap:8px;padding:2px 4px;font-size:11.5px;font-family:var(--mono);cursor:pointer}
+.song-list label .note{color:var(--muted);font-size:10.5px;margin-left:auto}
+.song-cat{font-size:11px;font-weight:600;color:var(--muted);margin:10px 0 2px;text-transform:uppercase;letter-spacing:.06em}
+.song-msg{font-size:11.5px;margin:4px 0;padding:6px 8px;border-radius:6px}
+.song-msg.err{color:var(--red,#ff6b6b);background:rgba(255,107,107,.08)}
+.song-msg.warn{color:var(--accent,#ffb454);background:rgba(255,180,84,.08)}
+.song-msg.ok{color:var(--teal,#2dd4bf)}
+#songModal .modal-card{width:min(560px,94vw);max-height:88vh;overflow:auto}
 </style>
 </head>
 <body>
@@ -5516,25 +5544,132 @@ function midiCoverageNote(cov, subject) {
        + ' an instrument that covers them, then push the preset.';
 }
 
+/* ==========================================================================
+   Score playback controls (NEW) — the pure scheduling core behind the local
+   (Web MIDI) player: mute/solo, melodic transpose (channel 10 never moves),
+   seeks that release held notes and chase controller state, and boundary
+   releases. Times are SOURCE seconds — playback speed is the caller's clock
+   concern. Mirrored by MidiPlayerLogic in pi/looper_bridge.py so the browser
+   player and the Pi player behave identically.
+   ========================================================================== */
+const DRUM_CH0 = 9;                              // 0-based MIDI channel 10
+const PLAY_SPEED_MIN = 0.25, PLAY_SPEED_MAX = 4, PLAY_TRANSPOSE_MAX = 24;
+
+/* What the user asked playback to do, whichever player ends up doing it.
+   mute/solo hold 1-based channel numbers; a/b are source seconds (both or
+   neither); roll switches the score to the piano-roll view. */
+const scoreCtl = { speed: 1, transpose: 0, mute: new Set(), solo: new Set(), a: null, b: null, roll: null };
+
+function createPlayerCore(events, opts) {
+  const core = {
+    i: 0, held: new Map(),                       // 'ch/srcNote' -> note actually sent
+    mute: new Set((opts && opts.mute) || []), solo: new Set((opts && opts.solo) || []),
+    transpose: (opts && opts.transpose) | 0,
+    audible(ch0) { const c = ch0 + 1; return core.solo.size ? core.solo.has(c) : !core.mute.has(c); },
+    xform(m) {                                   // bytes to send for one file event, or null
+      const st = m[0] & 0xF0, ch = m[0] & 0x0F, key = ch + '/' + m[1];
+      if (st === 0x90 && m[2]) {                 // note on
+        if (!core.audible(ch)) return null;
+        let n = m[1];
+        if (core.transpose && ch !== DRUM_CH0) {
+          n += core.transpose;
+          if (n < 0 || n > 127) return null;     // transposed off the keyboard
+        }
+        core.held.set(key, n);
+        return [m[0], n, m[2]];
+      }
+      if (st === 0x80 || st === 0x90) {          // note off
+        const sent = core.held.get(key);
+        if (sent === undefined) return null;     // its note-on never sounded
+        core.held.delete(key);
+        return [m[0], sent, m.length > 2 ? m[2] : 0];
+      }
+      return Array.from(m);                      // CC / program / bend pass through
+    },
+    advance(to) {                                // everything due up to source time `to`
+      const out = [];
+      while (core.i < events.length && events[core.i].t <= to) {
+        const m = core.xform(events[core.i].m);
+        if (m) out.push(m);
+        core.i++;
+      }
+      return out;
+    },
+    release() {                                  // stop / seek / loop boundary: nothing may hang
+      const out = [];
+      for (const [key, sent] of core.held) out.push([0x80 | +key.split('/')[0], sent, 0]);
+      core.held.clear();
+      for (let ch = 0; ch < 16; ch++) out.push([0xB0 | ch, 123, 0]);
+      return out;
+    },
+    setFilters(f) {                              // live mute/solo/transpose change
+      if (f.mute) core.mute = new Set(f.mute);
+      if (f.solo) core.solo = new Set(f.solo);
+      if (f.transpose !== undefined) core.transpose = f.transpose | 0;
+      const out = [];
+      for (const [key, sent] of core.held) {
+        const ch = +key.split('/')[0];
+        if (!core.audible(ch)) { out.push([0x80 | ch, sent, 0]); core.held.delete(key); }
+      }
+      return out;
+    },
+    seek(t) {                                    // release, then chase program/CC/bend state to t
+      const out = core.release();
+      const prog = new Map(), ccs = new Map(), bend = new Map();
+      let j = 0;
+      while (j < events.length && events[j].t < t) {
+        const m = events[j].m, st = m[0] & 0xF0, ch = m[0] & 0x0F;
+        if (st === 0xC0) prog.set(ch, m[1]);
+        else if (st === 0xB0 && m.length > 2 && m[1] < 120) ccs.set(ch + '/' + m[1], [ch, m[1], m[2]]);
+        else if (st === 0xE0 && m.length > 2) bend.set(ch, [m[1], m[2]]);
+        j++;
+      }
+      for (const [ch, p] of prog) out.push([0xC0 | ch, p]);
+      for (const [, [ch, cc, v]] of ccs) out.push([0xB0 | ch, cc, v]);
+      for (const [ch, [lo, hi]] of bend) out.push([0xE0 | ch, lo, hi]);
+      core.i = j;
+      return out;
+    },
+  };
+  return core;
+}
+
 function midiLocalPlay(file, loop) {
   midiLocalStop();
-  const held = new Set(); let i = 0, t0 = performance.now(), timer = null;
-  const allOff = () => { for (const k of held) { const [ch, n] = k.split('/'); midiSend([0x80 | +ch, +n, 0]); } held.clear(); for (let ch = 0; ch < 16; ch++) midiSend([0xB0 | ch, 123, 0]); };
+  const core = createPlayerCore(file.events, scoreCtl);
+  let anchorPos = 0, anchorAt = performance.now(), speed = scoreCtl.speed || 1, timer = null;
+  const pos = () => Math.min(file.length, anchorPos + (performance.now() - anchorAt) / 1000 * speed);
+  const rebase = p => { anchorPos = p; anchorAt = performance.now(); };
+  const emit = msgs => { for (const m of msgs) midiSend(m); };
+  const seekTo = t => { t = Math.max(0, Math.min(file.length, t)); emit(core.seek(t)); rebase(t); };
   const tick = () => {
-    const now = (performance.now() - t0) / 1000;
-    while (i < file.events.length && file.events[i].t <= now + 0.004) {
-      const m = file.events[i].m, st = m[0] & 0xF0, key = (m[0] & 0x0F) + '/' + m[1];
-      if (st === 0x90 && m[2]) held.add(key); else if (st === 0x80 || st === 0x90) held.delete(key);
-      midiSend(m); i++;
+    // the A/B passage is a place in the score panel's file, so it only steers
+    // playback of that file (matches what the bridge is sent)
+    const ab = scoreCtl.b !== null && file.name === score.file;
+    const end = ab ? Math.min(scoreCtl.b, file.length) : file.length;
+    let now = pos();
+    if (now >= end - 1e-6) {
+      emit(core.advance(end));                    // anything due right at the boundary
+      emit(core.release());
+      if (ab) seekTo(scoreCtl.a || 0);            // A/B repeat wraps regardless of loop
+      else if (loop) seekTo(0);
+      else { midi.player = null; midiPaint(); return; }
+      now = pos();
     }
-    midi.player.pos = Math.min(now, file.length);
-    if (i >= file.events.length) {
-      if (loop) { const wait = Math.max(0, file.length - now) * 1000; timer = setTimeout(() => { allOff(); i = 0; t0 = performance.now(); timer = setTimeout(tick, 1); }, wait); return; }
-      allOff(); midi.player = null; midiPaint(); return;
-    }
+    emit(core.advance(Math.min(now + 0.004 * speed, end)));
+    midi.player.pos = now;
     timer = setTimeout(tick, 4);
   };
-  midi.player = { name: file.name, length: file.length, pos: 0, stop() { clearTimeout(timer); allOff(); } };
+  midi.player = {
+    name: file.name, length: file.length, pos: 0,
+    stop() { clearTimeout(timer); emit(core.release()); },
+    seek(t) { seekTo(t); midi.player.pos = pos(); },
+    applyCtl() {                                  // scoreCtl changed: re-anchor, refilter
+      rebase(pos());
+      speed = scoreCtl.speed || 1;
+      emit(core.setFilters({ mute: scoreCtl.mute, solo: scoreCtl.solo, transpose: scoreCtl.transpose }));
+    },
+  };
   tick();
   midiPaint();
 }
@@ -6667,6 +6802,7 @@ function scoreSvg(model) {
     const yOf = step => bot - step * (SCORE_GAP / 2);
     el.push(`<text class="sc-name" x="8" y="${(mid - 4).toFixed(1)}">${escapeHtml(part.name)}</text>`);
     el.push(`<text class="sc-sub" x="8" y="${(mid + 9).toFixed(1)}">ch ${part.ch} · ${part.clef}${scoreOctLabel(part)}</text>`);
+    el.push(scoreMsButtons(part.ch, mid + 15));
     for (let i = 0; i < 5; i++) line(SCORE_GUTTER - 8, top + i * SCORE_GAP, W - 12, top + i * SCORE_GAP, 'sc-staff');
     for (const b of bars) line(px(b.tick), top, px(b.tick), bot, 'sc-bar');
     line(W - 12, top, W - 12, bot, 'sc-bar');
@@ -6716,8 +6852,64 @@ function scoreSvg(model) {
              second[second.length - 1].x + (a.up ? 4.6 : -4.6), second[second.length - 1].tipY + dir * 4, 'sc-beam');
     }
   });
+  el.push(scoreAbRegion(model, px, H));
   el.push(`<line id="scPlay" class="sc-play" x1="${SCORE_GUTTER}" y1="20" x2="${SCORE_GUTTER}" y2="${H - 4}"/>`);
   const k = score.scale || 1;      // vector: scaling the box scales everything, playhead included
+  return `<svg id="scSvg" width="${(W * k).toFixed(0)}" height="${(H * k).toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H}">${el.join('')}</svg>`;
+}
+
+/* ---- score playback controls (NEW): shared bits of both score views ---- */
+/** The per-part mute/solo buttons drawn in the gutter (click handled by the box). */
+function scoreMsButtons(ch, y) {
+  const on = k => (k === 'mute' ? scoreCtl.mute : scoreCtl.solo).has(ch);
+  const btn = (k, x, label) =>
+    `<g class="sc-ms${on(k) ? ' on' : ''}" data-mskind="${k}" data-ch="${ch}" role="button">` +
+    `<rect x="${x}" y="${(y - 9).toFixed(1)}" width="16" height="13" rx="2"/>` +
+    `<text x="${x + 8}" y="${(y + 1).toFixed(1)}">${label}</text><title>${k === 'mute' ? 'Mute' : 'Solo'} channel ${ch}</title></g>`;
+  return btn('mute', 8, 'M') + btn('solo', 28, 'S');
+}
+/** The shaded A→B repeat passage, when one is set for the file on show. */
+function scoreAbRegion(model, px, H) {
+  if (scoreCtl.a === null || scoreCtl.b === null) return '';
+  const x1 = px(scoreTickAt(model, scoreCtl.a)), x2 = px(scoreTickAt(model, scoreCtl.b));
+  return `<rect class="sc-ab" x="${x1.toFixed(1)}" y="18" width="${Math.max(1, x2 - x1).toFixed(1)}" height="${H - 22}"/>`
+       + `<text class="sc-ab-lbl" x="${(x1 + 3).toFixed(1)}" y="26">A</text>`
+       + `<text class="sc-ab-lbl" x="${(x2 + 3).toFixed(1)}" y="26">B</text>`;
+}
+
+/* ---- score playback controls (NEW): piano roll, for files that do not
+   notate honestly (played-in material, swing) or whenever it is preferred.
+   Same coordinate system as the staff view, so seeking, the playhead, the
+   A/B shading and the gutter mute/solo buttons all carry over. ---- */
+function scoreRollSvg(model) {
+  const ppq = model.ppq, bars = model.bars, px = t => SCORE_GUTTER + (t / ppq) * SCORE_PPQ_PX * score.zoom;
+  const W = px(bars.length ? bars[bars.length - 1].tick + bars[bars.length - 1].ticks : ppq * 4) + 24;
+  const ROW = SCORE_ROW;
+  const H = model.parts.length * ROW + 26;
+  const el = [];
+  score.notes = [];
+  bars.forEach(b => el.push(`<text class="sc-barno" x="${(px(b.tick) + 3).toFixed(1)}" y="14">${b.num}</text>`));
+  model.parts.forEach((part, pi) => {
+    const top = 26 + pi * ROW + 6, bot = top + ROW - 18;
+    let lo = 127, hi = 0;
+    for (const n of part.notes) { lo = Math.min(lo, n.note); hi = Math.max(hi, n.note); }
+    if (hi < lo) { lo = 60; hi = 72; }
+    if (hi - lo < 7) { const pad = Math.ceil((7 - (hi - lo)) / 2); lo = Math.max(0, lo - pad); hi = Math.min(127, hi + pad); }
+    const yOf = n => bot - (n - lo) / (hi - lo) * (bot - top - 4);
+    el.push(`<text class="sc-name" x="8" y="${(top + 8).toFixed(1)}">${escapeHtml(part.name)}</text>`);
+    el.push(`<text class="sc-sub" x="8" y="${(top + 21).toFixed(1)}">ch ${part.ch}${part.perc ? ' · drums' : ''}</text>`);
+    el.push(scoreMsButtons(part.ch, top + 33));
+    el.push(`<rect class="sc-lane" x="${SCORE_GUTTER - 8}" y="${top}" width="${W - SCORE_GUTTER - 4}" height="${bot - top}"/>`);
+    for (const b of bars) el.push(`<line class="sc-bar" x1="${px(b.tick).toFixed(1)}" y1="${top}" x2="${px(b.tick).toFixed(1)}" y2="${bot}"/>`);
+    for (const n of part.notes) {
+      const x = px(n.tick), w = Math.max(2.5, px(n.tick + n.dur) - x - 1), y = yOf(n.note), id = 'n' + score.notes.length;
+      el.push(`<rect id="${id}" class="sc-note sc-rollnote" x="${x.toFixed(1)}" y="${(y - 2).toFixed(1)}" width="${w.toFixed(1)}" height="4" rx="1.4"/>`);
+      score.notes.push({ id, from: n.tick, to: n.tick + Math.max(n.dur, model.grid || 1) });
+    }
+  });
+  el.push(scoreAbRegion(model, px, H));
+  el.push(`<line id="scPlay" class="sc-play" x1="${SCORE_GUTTER}" y1="20" x2="${SCORE_GUTTER}" y2="${H - 4}"/>`);
+  const k = score.scale || 1;
   return `<svg id="scSvg" width="${(W * k).toFixed(0)}" height="${(H * k).toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H}">${el.join('')}</svg>`;
 }
 function scoreFlag(x, y, up, n) {
@@ -6740,6 +6932,7 @@ function scoreRest(x, mid, v) {
 function scoreFiles() { return midi.netHost ? midi.files : midi.local; }
 function scoreSelect(name) {
   const f = scoreFiles().find(x => x.name === name);
+  if (name !== score.file) { scoreCtl.a = scoreCtl.b = null; scoreApplyCtl(); }   // A/B is a place in one file
   score.file = name;
   score.model = null;
   if (f && f.parsed) { score.model = scoreQuantise(scoreParts(f.parsed)); if (score.model) score.model.bars = scoreBars(score.model); }
@@ -6756,13 +6949,17 @@ function scorePaint() {
     note.textContent = ''; return;
   }
   score.scale = $('#scoreSec') && $('#scoreSec').parentElement && $('#scoreSec').parentElement.id === 'center' ? 1.5 : 1;
-  box.innerHTML = scoreSvg(score.model);
+  // piano roll (NEW): explicit choice wins; a file too loose to notate honestly defaults to the roll
+  const roll = scoreCtl.roll !== null ? scoreCtl.roll : !!score.model.loose;
+  if ($('#scoreRoll')) $('#scoreRoll').checked = roll;
+  box.innerHTML = roll ? scoreRollSvg(score.model) : scoreSvg(score.model);
   chanPaintFile();
+  scoreCtlPaint();
   const m = score.model;
   note.textContent = m.swing
-    ? 'Shuffle feel — written straight, so the note values are approximate.'
+    ? 'Shuffle feel — written straight, so the note values are approximate' + (roll ? ' (piano roll shown).' : ' — try the piano roll.')
     : m.loose
-    ? 'This file was played in rather than stepped, so the note values are approximate.'
+    ? 'This file was played in rather than stepped, so the note values are approximate' + (roll ? ' (piano roll shown).' : ' — try the piano roll.')
     : `${m.parts.length} ${m.parts.length === 1 ? 'part' : 'parts'} · ${m.bars.length} bars · ${m.length.toFixed(1)} s`;
   scoreAnimate();
 }
@@ -6777,18 +6974,88 @@ function scoreTickAt(model, sec) {
   }
   return tick + (sec - t) * 1e6 * model.ppq / cur;
 }
-/** Where playback is right now, in seconds, or null when nothing is playing. */
+/** Ticks -> seconds: the inverse of scoreTickAt, for click-to-seek (NEW). */
+function scoreSecAt(model, tick) {
+  const tempos = model.tempos || [[0, 500000]];
+  let t = 0, tk = 0, cur = tempos[0][1];
+  for (let i = 1; i < tempos.length; i++) {
+    if (tempos[i][0] >= tick) break;
+    t += (tempos[i][0] - tk) * cur / model.ppq / 1e6;
+    tk = tempos[i][0]; cur = tempos[i][1];
+  }
+  return t + (tick - tk) * cur / model.ppq / 1e6;
+}
+/** Where playback is right now, in SOURCE seconds, or null when nothing is
+ *  playing. The bridge reports source-time and its speed, so interpolation
+ *  between polls scales elapsed wall time by the speed and wraps an A/B
+ *  passage the way the Pi does (NEW). */
 function scorePos() {
   if (midi.player && midi.player.name === score.file) return midi.player.pos;
   const st = midi.status;
   if (st && st.playing && st.file === score.file) {
     if (!score.anchor || score.anchor.pos !== st.position_s) score.anchor = { pos: st.position_s, at: performance.now() };
-    let p = score.anchor.pos + (performance.now() - score.anchor.at) / 1000;
-    if (st.length_s) p = st.loop ? p % st.length_s : Math.min(p, st.length_s);
+    let p = score.anchor.pos + (performance.now() - score.anchor.at) / 1000 * (st.speed || 1);
+    if (typeof st.a === 'number' && typeof st.b === 'number' && st.b > st.a && p >= st.b)
+      p = st.a + (p - st.a) % (st.b - st.a);
+    else if (st.length_s) p = st.loop ? p % st.length_s : Math.min(p, st.length_s);
     return p;
   }
   score.anchor = null;
   return null;
+}
+/* ---- score playback controls (NEW): pushing scoreCtl to whichever player is
+   playing, and seeking. The bridge gets explicit validated API calls
+   (/api/midi/params, /api/midi/seek); the local player is told directly. ---- */
+function scoreCtlParams() {
+  const p = { speed: scoreCtl.speed, transpose: scoreCtl.transpose,
+              mute: [...scoreCtl.mute].sort((a, b) => a - b), solo: [...scoreCtl.solo].sort((a, b) => a - b),
+              a: scoreCtl.a, b: scoreCtl.b };
+  return p;
+}
+async function scoreApplyCtl() {
+  if (midi.player && midi.player.applyCtl) midi.player.applyCtl();
+  if (midi.netHost && midi.status && midi.status.playing) {
+    try {
+      const j = await midiApi('/api/midi/params', scoreCtlParams());
+      if (j && j.status) { midi.status = j.status; score.anchor = null; }
+      else if (j && j.ok === false) consoleLog('err', 'Playback controls: ' + (j.message || 'refused'));
+    } catch (e) {}
+  }
+  scoreCtlPaint();
+}
+async function scoreSeek(sec) {
+  const f = scoreFiles().find(x => x.name === score.file);
+  if (!f) return;
+  sec = Math.max(0, sec);
+  if (midi.player && midi.player.name === score.file) { midi.player.seek(sec); return; }
+  if (midi.netHost) {
+    if (midi.status && midi.status.playing && midi.status.file === score.file) {
+      try { const j = await midiApi('/api/midi/seek', { position_s: sec });
+            if (j && j.ok === false) consoleLog('err', 'Seek: ' + (j.message || 'refused')); } catch (e) {}
+    } else {
+      // not playing yet: start this file from the clicked spot, with the current controls
+      try {
+        const j = await midiApi('/api/midi/play', Object.assign({ file: score.file, loop: midi.loop, position_s: sec }, scoreCtlParams()));
+        if (j && j.ok === false) { consoleLog('err', 'Play: ' + (j.message || 'refused')); return; }
+      } catch (e) { return; }
+    }
+    try { midi.status = await midiApi('/api/midi/status'); } catch (e) {}
+    score.anchor = null; midiPaint();
+    return;
+  }
+  if (midiTransport() === 'webmidi') { midiLocalPlay(f, midi.loop); if (midi.player) midi.player.seek(sec); }
+}
+/** The A/B + speed + transpose row under the score reflects scoreCtl. */
+function scoreCtlPaint() {
+  const line = $('#scoreCtlNote'); if (!line) return;
+  const bits = [];
+  if (scoreCtl.a !== null && scoreCtl.b !== null) bits.push(`repeat ${scoreCtl.a.toFixed(1)}–${scoreCtl.b.toFixed(1)} s`);
+  else if (scoreCtl.pendingA !== undefined) bits.push(`A at ${scoreCtl.pendingA.toFixed(1)} s — press B to close the passage`);
+  if (scoreCtl.transpose) bits.push(`transpose ${scoreCtl.transpose > 0 ? '+' : ''}${scoreCtl.transpose} st (drums stay put)`);
+  if (scoreCtl.mute.size) bits.push('muted ch ' + [...scoreCtl.mute].sort((a, b) => a - b).join(','));
+  if (scoreCtl.solo.size) bits.push('solo ch ' + [...scoreCtl.solo].sort((a, b) => a - b).join(','));
+  line.textContent = bits.join(' · ');
+  const ab = $('#scoreLoopClr'); if (ab) ab.hidden = scoreCtl.a === null && scoreCtl.pendingA === undefined;
 }
 function scoreAnimate() {
   cancelAnimationFrame(score.raf);
@@ -6826,6 +7093,19 @@ function scoreBuildSection() {
       <label class="midi-loop" title="Scroll to keep the playhead in view"><input type="checkbox" id="scoreFollow" checked> follow</label>
     </div>
     <div id="scoreBox"><div class="play-hint">Upload a .mid in the MIDI panel to see its notes.</div></div>
+    <!-- score playback controls (NEW): speed, transpose, A/B repeat, piano roll -->
+    <div class="midi-line" id="scoreCtlRow">
+      <select id="scoreSpeed" class="midi-sel" title="Playback speed — pitch is unchanged; the score keeps musical time">
+        ${[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map(v => `<option value="${v}"${v === 1 ? ' selected' : ''}>${v}&times;</option>`).join('')}
+      </select>
+      <input type="number" id="scoreTrans" class="midi-sel" min="-24" max="24" step="1" value="0"
+             title="Transpose the melodic channels this many semitones — channel 10 (drums) is never moved" aria-label="Transpose (semitones)">
+      <button class="btn sm" id="scoreLoopA" title="Start the repeat passage at the playhead (or the last clicked spot)">A</button>
+      <button class="btn sm" id="scoreLoopB" title="Close the repeat passage at the playhead (or the last clicked spot)">B</button>
+      <button class="btn sm" id="scoreLoopClr" title="Clear the repeat passage" hidden>&#10005;</button>
+      <label class="midi-loop" title="Notes as time-and-pitch bars — honest for files that resist notation"><input type="checkbox" id="scoreRoll"> roll</label>
+    </div>
+    <div class="midi-line mono" id="scoreCtlNote"></div>
     <div class="midi-line mono" id="scoreNote"></div>
   </div>`;
   const after = $('#chanSec') || $('#midiSec') || $('#device').lastElementChild;
@@ -6835,6 +7115,51 @@ function scoreBuildSection() {
   $('#scoreFollow').addEventListener('change', ev => { score.follow = ev.target.checked; });
   $('#scoreZoomIn').addEventListener('click', () => { score.zoom = Math.min(3, score.zoom * 1.3); scorePaint(); });
   $('#scoreZoomOut').addEventListener('click', () => { score.zoom = Math.max(0.4, score.zoom / 1.3); scorePaint(); });
+  /* ---- score playback controls (NEW) ---- */
+  $('#scoreSpeed').addEventListener('change', ev => {
+    scoreCtl.speed = Math.min(PLAY_SPEED_MAX, Math.max(PLAY_SPEED_MIN, +ev.target.value || 1));
+    scoreApplyCtl();
+  });
+  $('#scoreTrans').addEventListener('change', ev => {
+    scoreCtl.transpose = Math.min(PLAY_TRANSPOSE_MAX, Math.max(-PLAY_TRANSPOSE_MAX, Math.round(+ev.target.value) || 0));
+    ev.target.value = scoreCtl.transpose;
+    scoreApplyCtl();
+  });
+  $('#scoreRoll').addEventListener('change', ev => { scoreCtl.roll = ev.target.checked; scorePaint(); });
+  const markSpot = () => { const p = scorePos(); return p !== null ? p : (score.lastSeek || 0); };
+  $('#scoreLoopA').addEventListener('click', () => {
+    scoreCtl.a = scoreCtl.b = null; scoreCtl.pendingA = markSpot();
+    scoreApplyCtl(); scorePaint();
+  });
+  $('#scoreLoopB').addEventListener('click', () => {
+    const b = markSpot(), a = scoreCtl.pendingA !== undefined ? scoreCtl.pendingA : (scoreCtl.a !== null ? scoreCtl.a : 0);
+    if (b - a < 0.05) { consoleLog('err', 'The B point must come after A — press A first, let it play, then B'); return; }
+    scoreCtl.a = a; scoreCtl.b = b; delete scoreCtl.pendingA;
+    scoreApplyCtl(); scorePaint();
+  });
+  $('#scoreLoopClr').addEventListener('click', () => {
+    scoreCtl.a = scoreCtl.b = null; delete scoreCtl.pendingA;
+    scoreApplyCtl(); scorePaint();
+  });
+  /* click on the score: gutter buttons toggle mute/solo, anywhere else seeks */
+  $('#scoreBox').addEventListener('click', ev => {
+    const ms = ev.target.closest && ev.target.closest('[data-mskind]');
+    if (ms) {
+      const ch = +ms.dataset.ch, set = ms.dataset.mskind === 'mute' ? scoreCtl.mute : scoreCtl.solo;
+      if (set.has(ch)) set.delete(ch); else set.add(ch);
+      scoreApplyCtl(); scorePaint();
+      return;
+    }
+    const svg = $('#scSvg'), m = score.model;
+    if (!svg || !m) return;
+    const box = $('#scoreBox'), rect = box.getBoundingClientRect();
+    const x = (ev.clientX - rect.left + box.scrollLeft) / (score.scale || 1);
+    if (x <= SCORE_GUTTER) return;
+    const tick = (x - SCORE_GUTTER) / (SCORE_PPQ_PX * score.zoom) * m.ppq;
+    const sec = Math.min(m.length || 0, scoreSecAt(m, Math.max(0, tick)));
+    score.lastSeek = sec;
+    scoreSeek(sec);
+  });
 }
 /** Follow whatever starts playing, and pick a file up as soon as one is known. */
 function scoreSync() {
@@ -6843,6 +7168,491 @@ function scoreSync() {
   if (playing && playing !== score.file && files.some(f => f.name === playing)) return scoreSelect(playing);
   if (!score.file && files.length) return scoreSelect(files[0].name);
   if (score.file && !score.model && files.some(f => f.name === score.file && f.parsed)) return scoreSelect(score.file);
+}
+
+/* ============================================================================
+   Song sessions (NEW) — one shareable JSON file that carries everything a song
+   needs: the chosen MIDI files (bytes, base64), the preset(s) exactly as they
+   are in the workspace (custom text and chain-meta included), optionally the
+   saved loops from the pedal's SD card, the playback preferences (speed,
+   transpose, mute/solo, A/B, loop), the footswitch assignments and the panel
+   layout. Plain JSON + base64 — no zip, so the file opens anywhere.
+
+   Opening a session validates the ENTIRE package before anything is touched:
+   a bad byte anywhere refuses the whole file. Applying is explicit and
+   additive — presets are added under fresh names, files that already exist
+   are renamed (or replaced only when asked), loops only move when ticked,
+   and nothing is pushed to the pedal without its own checkbox.
+   ========================================================================== */
+const SONG_FORMAT = 'gls-song-session';
+const SONG_VERSION = 1;
+const SONG_LIMITS = {
+  midiBytes: 2 * 1024 * 1024, midiCount: 64,
+  loopBytes: MAX_LOOP_BYTES, loopCount: 32,
+  presetCount: 64, presetText: 64 * 1024,
+  total: 64 * 1024 * 1024, name: 80, title: 120,
+};
+
+function b64FromBytes(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function bytesFromB64(s) {
+  const bin = atob(s);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
+}
+/** "drums.mid" against ["drums.mid", …] -> "drums-2.mid": imports rename, never overwrite. */
+function dedupeName(name, existing) {
+  if (!existing.includes(name)) return name;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : '';
+  for (let n = 2; n < 1000; n++) {
+    const cand = stem + '-' + n + ext;
+    if (!existing.includes(cand)) return cand;
+  }
+  return stem + '-' + Date.now() + ext;
+}
+
+/** The playback-preference rules, shared by export, import and the player APIs. */
+function validatePlaybackPrefs(p, errors, where) {
+  const bad = m => { errors.push(where + ': ' + m); };
+  if (typeof p !== 'object' || p === null) { bad('not an object'); return; }
+  if (p.file !== undefined && typeof p.file !== 'string') bad('file must be a name');
+  if (p.speed !== undefined && !(typeof p.speed === 'number' && p.speed >= PLAY_SPEED_MIN && p.speed <= PLAY_SPEED_MAX))
+    bad(`speed must be a number between ${PLAY_SPEED_MIN} and ${PLAY_SPEED_MAX}`);
+  if (p.transpose !== undefined && !(Number.isInteger(p.transpose) && Math.abs(p.transpose) <= PLAY_TRANSPOSE_MAX))
+    bad(`transpose must be a whole number within ±${PLAY_TRANSPOSE_MAX}`);
+  for (const k of ['mute', 'solo'])
+    if (p[k] !== undefined && !(Array.isArray(p[k]) && p[k].every(c => Number.isInteger(c) && c >= 1 && c <= 16)))
+      bad(k + ' must be a list of channels 1-16');
+  const hasA = p.a !== undefined && p.a !== null, hasB = p.b !== undefined && p.b !== null;
+  if (hasA !== hasB) bad('the repeat passage needs both A and B');
+  else if (hasA) {
+    if (!(typeof p.a === 'number' && typeof p.b === 'number' && p.a >= 0 && p.b - p.a >= 0.05))
+      bad('the repeat passage must be at least 0.05 s and A before B');
+  }
+}
+
+/** The whole package checked before ANYTHING is applied. Returns
+ *  { ok, errors, warnings, data } — data holds the decoded bytes so applying
+ *  never re-parses (and cannot half-succeed on a corrupt file). */
+function sessionValidate(pkg) {
+  const errors = [], warnings = [];
+  const data = { title: '', presets: [], midi: [], loops: [], playback: null, switches: null, layout: null };
+  if (typeof pkg !== 'object' || pkg === null) return { ok: false, errors: ['This is not a song session file.'], warnings, data };
+  if (pkg.format !== SONG_FORMAT) return { ok: false, errors: ['This is not a song session file (missing the gls-song-session marker).'], warnings, data };
+  if (!Number.isInteger(pkg.version) || pkg.version < 1)
+    return { ok: false, errors: ['The session has no usable version number.'], warnings, data };
+  if (pkg.version > SONG_VERSION)
+    return { ok: false, errors: [`This session was made by a newer Studio (format v${pkg.version}; this one reads up to v${SONG_VERSION}). Update, then open it again.`], warnings, data };
+  data.title = typeof pkg.title === 'string' ? pkg.title.slice(0, SONG_LIMITS.title) : '';
+  let total = 0;
+  const nameOk = (n, exts) => typeof n === 'string' && n.length <= SONG_LIMITS.name && !n.startsWith('.') &&
+    /^[A-Za-z0-9._ -]+$/.test(n) && exts.some(e => n.toLowerCase().endsWith(e));
+
+  const presets = pkg.presets === undefined ? [] : pkg.presets;
+  if (!Array.isArray(presets)) errors.push('presets: not a list');
+  else if (presets.length > SONG_LIMITS.presetCount) errors.push(`presets: more than ${SONG_LIMITS.presetCount}`);
+  else presets.forEach((p, i) => {
+    const where = `preset ${i + 1}${p && typeof p.title === 'string' ? ` (${p.title})` : ''}`;
+    if (typeof p !== 'object' || p === null || typeof p.title !== 'string' || !p.title.trim()) { errors.push(where + ': missing a title'); return; }
+    if (p.mode !== 'chain' && p.mode !== 'custom') { errors.push(where + ': mode must be chain or custom'); return; }
+    const clean = { title: p.title.slice(0, SONG_LIMITS.title), mode: p.mode,
+                    fileName: typeof p.fileName === 'string' ? p.fileName.slice(0, SONG_LIMITS.name) : null,
+                    fileNameCustom: !!p.fileNameCustom,
+                    chain: Array.isArray(p.chain) ? p.chain : [],
+                    instruments: Array.isArray(p.instruments) ? p.instruments : [],
+                    customText: typeof p.customText === 'string' ? p.customText : null };
+    if (clean.mode === 'custom' && typeof clean.customText !== 'string') { errors.push(where + ': custom routing without its text'); return; }
+    if (clean.customText && clean.customText.length > SONG_LIMITS.presetText) { errors.push(where + ': the PatchScript is longer than ' + (SONG_LIMITS.presetText / 1024) + ' KB'); return; }
+    let text;
+    try { text = generateText(clean); } catch (e) { errors.push(where + ': does not generate PatchScript (' + e.message + ')'); return; }
+    if (typeof text !== 'string' || text.length > SONG_LIMITS.presetText) { errors.push(where + ': generates unusable PatchScript'); return; }
+    total += text.length;
+    data.presets.push(clean);
+  });
+
+  const midiFiles = pkg.midiFiles === undefined ? [] : pkg.midiFiles;
+  if (!Array.isArray(midiFiles)) errors.push('midiFiles: not a list');
+  else if (midiFiles.length > SONG_LIMITS.midiCount) errors.push(`midiFiles: more than ${SONG_LIMITS.midiCount}`);
+  else midiFiles.forEach((f, i) => {
+    const where = `MIDI file ${i + 1}${f && typeof f.name === 'string' ? ` (${f.name})` : ''}`;
+    if (typeof f !== 'object' || f === null || !nameOk(f.name, ['.mid', '.midi', '.smf'])) { errors.push(where + ': bad name (letters, digits, . _ - and a .mid ending)'); return; }
+    if (typeof f.data !== 'string') { errors.push(where + ': no data'); return; }
+    let bytes;
+    try { bytes = bytesFromB64(f.data); } catch (e) { errors.push(where + ': corrupt base64 data'); return; }
+    if (bytes.length > SONG_LIMITS.midiBytes) { errors.push(where + `: ${fmtBytes(bytes.length)} — the limit is ${fmtBytes(SONG_LIMITS.midiBytes)}`); return; }
+    let parsed;
+    try { parsed = parseSmf(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)); }
+    catch (e) { errors.push(where + ': not a usable MIDI file (' + e.message + ')'); return; }
+    total += bytes.length;
+    data.midi.push({ name: f.name.replace(/ /g, '_'), bytes, parsed });
+  });
+
+  const loops = pkg.loops === undefined ? [] : pkg.loops;
+  if (!Array.isArray(loops)) errors.push('loops: not a list');
+  else if (loops.length > SONG_LIMITS.loopCount) errors.push(`loops: more than ${SONG_LIMITS.loopCount}`);
+  else loops.forEach((f, i) => {
+    const where = `loop ${i + 1}${f && typeof f.name === 'string' ? ` (${f.name})` : ''}`;
+    if (typeof f !== 'object' || f === null || !nameOk(f.name, ['.wav'])) { errors.push(where + ': bad name (letters, digits, . _ - and a .wav ending)'); return; }
+    if (typeof f.data !== 'string') { errors.push(where + ': no data'); return; }
+    let bytes;
+    try { bytes = bytesFromB64(f.data); } catch (e) { errors.push(where + ': corrupt base64 data'); return; }
+    if (bytes.length > SONG_LIMITS.loopBytes) { errors.push(where + `: ${fmtBytes(bytes.length)} — the limit is ${fmtBytes(SONG_LIMITS.loopBytes)}`); return; }
+    if (!isWav(bytes)) { errors.push(where + ': not a RIFF/WAVE file'); return; }
+    const info = wavInfo(bytes);
+    if (!info) { errors.push(where + ': WAV headers unreadable'); return; }
+    total += bytes.length;
+    data.loops.push({ name: f.name, bytes,
+                      seconds: info.dataBytes / Math.max(1, info.rate * info.channels * (info.bits / 8)) });
+  });
+
+  if (pkg.playback !== undefined && pkg.playback !== null) {
+    validatePlaybackPrefs(pkg.playback, errors, 'playback preferences');
+    data.playback = pkg.playback;
+    if (typeof pkg.playback.file === 'string' && !data.midi.some(m => m.name === pkg.playback.file))
+      warnings.push(`The playback preferences point at "${pkg.playback.file}", which this session does not carry — they will apply once a file of that name exists.`);
+  }
+  if (pkg.switches !== undefined && pkg.switches !== null) {
+    const sw = pkg.switches;
+    const okAct = a => typeof a === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(a);
+    if (!Array.isArray(sw) || sw.length > 6 ||
+        !sw.every(s => s && okAct(s.tap || 'none') && okAct(s.hold || 'none') &&
+                       (s.note === undefined || (Number.isInteger(s.note) && s.note >= 0 && s.note <= 127))))
+      errors.push('footswitches: each of up to six rows needs tap/hold action names and an optional note 0-127');
+    else data.switches = sw.map(s => ({ tap: s.tap || 'none', hold: s.hold || 'none', note: s.note }));
+  }
+  if (pkg.layout !== undefined && pkg.layout !== null) {
+    const lay = pkg.layout;
+    const strs = a => Array.isArray(a) && a.every(x => typeof x === 'string' && x.length <= 40);
+    if (typeof lay !== 'object' || typeof lay.regions !== 'object' || lay.regions === null ||
+        !Object.keys(lay.regions).every(r => ['library', 'center', 'device', 'hidden'].includes(r) && strs(lay.regions[r])) ||
+        (lay.closed !== undefined && !strs(lay.closed)))
+      errors.push('layout: regions must map library/center/device/hidden to lists of panel ids');
+    else data.layout = { regions: lay.regions, closed: lay.closed || [] };
+  }
+  if (total > SONG_LIMITS.total) errors.push(`The session unpacks to ${fmtBytes(total)} — the limit is ${fmtBytes(SONG_LIMITS.total)}.`);
+  if (!data.presets.length && !data.midi.length && !data.loops.length && !data.playback && !data.switches && !data.layout && !errors.length)
+    errors.push('The session is empty.');
+  return { ok: !errors.length, errors, warnings, data };
+}
+
+/* ---- building a session from the current state ---- */
+async function sessionBuild(sel) {
+  const pkg = { format: SONG_FORMAT, version: SONG_VERSION, app: 'GuitarLoopSynth Studio',
+                created: new Date().toISOString(), title: sel.title || 'Song',
+                presets: [], midiFiles: [], loops: [] };
+  for (const id of sel.presets) {
+    const p = store.state.presets.find(x => x.id === id);
+    if (!p) continue;
+    // the workspace object verbatim (minus the workspace id): custom text and
+    // chain-meta survive because nothing is regenerated on the way out
+    pkg.presets.push({ title: p.title, fileName: p.fileName, fileNameCustom: !!p.fileNameCustom,
+                       mode: p.mode, chain: p.chain, instruments: p.instruments || [], customText: p.customText });
+  }
+  for (const name of sel.midi) {
+    const f = scoreFiles().find(x => x.name === name);
+    if (!f) continue;
+    let bytes = f.bytes;
+    if (!bytes && midi.netHost) {
+      const r = await fetch('/midi-files/' + encodeURIComponent(name));
+      if (!r.ok) throw new Error(`could not read ${name} from the Pi`);
+      bytes = new Uint8Array(await r.arrayBuffer());
+    }
+    if (!bytes) throw new Error(`${name} has no bytes to export — re-upload it first`);
+    if (bytes.length > SONG_LIMITS.midiBytes) throw new Error(`${name} is ${fmtBytes(bytes.length)} — too big for a session`);
+    pkg.midiFiles.push({ name, data: b64FromBytes(bytes) });
+  }
+  for (const name of sel.loops) {
+    const bytes = await loopFetch(name);                      // explicit: only ticked loops leave the pedal
+    if (bytes.length > SONG_LIMITS.loopBytes) throw new Error(`${name} is ${fmtBytes(bytes.length)} — too big for a session`);
+    pkg.loops.push({ name, data: b64FromBytes(bytes) });
+  }
+  if (sel.playback) {
+    pkg.playback = Object.assign({ file: score.file || undefined, loop: !!midi.loop, roll: scoreCtl.roll }, scoreCtlParams());
+    if (pkg.playback.a === null) { delete pkg.playback.a; delete pkg.playback.b; }
+  }
+  if (sel.switches && dev.switches && Array.isArray(dev.switches.switches))
+    pkg.switches = dev.switches.switches.slice(0, 6).map(s => ({ tap: s.tap || 'none', hold: s.hold || 'none', note: s.note }));
+  if (sel.layout) pkg.layout = layoutSnapshot();
+  return pkg;
+}
+
+/* ---- applying a validated session (only what was ticked; never silently
+        overwriting a file, a loop or the pedal) ---- */
+async function sessionApply(data, choose) {
+  const done = [], failed = [];
+  for (const p of data.presets) {
+    if (!choose.presets.has(p.title)) continue;
+    addPreset(Object.assign({ id: uid(), updated: Date.now() }, p, { title: uniqueTitle(p.title) }));
+    done.push('preset ' + p.title);
+  }
+  const existingMidi = scoreFiles().map(f => f.name);
+  for (const f of data.midi) {
+    if (!choose.midi.has(f.name)) continue;
+    const name = choose.replace ? f.name : dedupeName(f.name, existingMidi);
+    try {
+      if (midi.netHost) {
+        const r = await fetch('/midi-files/' + encodeURIComponent(name), { method: 'PUT', body: f.bytes });
+        const j = await r.json().catch(() => ({}));
+        if (!j.ok) throw new Error(j.message || ('HTTP ' + r.status));
+      } else {
+        midi.local = midi.local.filter(x => x.name !== name)
+          .concat([{ name, length: f.parsed.length, events: f.parsed.events, uses: midiUsage(f.parsed.events), parsed: f.parsed, bytes: f.bytes }]);
+      }
+      existingMidi.push(name);
+      done.push('MIDI ' + name + (name !== f.name ? ` (renamed from ${f.name})` : ''));
+    } catch (e) { failed.push(`MIDI ${f.name}: ${e.message}`); }
+  }
+  if (midi.netHost) await midiRefreshFiles(); else { scoreSync(); midiPaint(); }
+  const existingLoops = (dev.loops && Array.isArray(dev.loops.loops)) ? [...dev.loops.loops] : [];
+  for (const f of data.loops) {
+    if (!choose.loops.has(f.name)) continue;
+    const base = loopFileName(f.name);
+    if (!base) { failed.push(`loop ${f.name}: unusable name`); continue; }
+    const name = choose.replace ? base : dedupeName(base, existingLoops);
+    if (!loopFits(f.seconds, name)) { failed.push(`loop ${name}: longer than the looper holds`); continue; }
+    try { await loopPut(name, f.bytes); existingLoops.push(name); done.push('loop ' + name + (name !== f.name ? ` (renamed from ${f.name})` : '')); }
+    catch (e) { failed.push(`loop ${f.name}: ${e.message}`); }
+  }
+  if (data.loops.some(f => choose.loops.has(f.name))) await refreshLoops();
+  if (data.playback && choose.playback) {
+    const p = data.playback;
+    if (p.speed !== undefined) scoreCtl.speed = p.speed;
+    if (p.transpose !== undefined) scoreCtl.transpose = p.transpose;
+    scoreCtl.mute = new Set(p.mute || []);
+    scoreCtl.solo = new Set(p.solo || []);
+    scoreCtl.a = typeof p.a === 'number' ? p.a : null;
+    scoreCtl.b = typeof p.b === 'number' ? p.b : null;
+    if (p.roll === true || p.roll === false) scoreCtl.roll = p.roll;
+    if (p.loop !== undefined) { midi.loop = !!p.loop; if ($('#midiLoopChk')) $('#midiLoopChk').checked = midi.loop; }
+    if ($('#scoreSpeed')) $('#scoreSpeed').value = String(scoreCtl.speed);
+    if ($('#scoreTrans')) $('#scoreTrans').value = String(scoreCtl.transpose);
+    if (typeof p.file === 'string') {
+      const target = choose.replace ? p.file : (choose.midi.has(p.file) ? dedupeName(p.file, existingMidi.filter(n => n !== p.file)) : p.file);
+      const have = scoreFiles().some(f => f.name === p.file) ? p.file : (scoreFiles().some(f => f.name === target) ? target : null);
+      if (have) { score.file = null; scoreSelect(have); }
+      else failed.push(`playback: "${p.file}" is not among the MIDI files here — pick it in the Score panel when it is`);
+    }
+    scoreApplyCtl(); scorePaint();
+    done.push('playback preferences');
+  }
+  if (data.switches && choose.switches) {
+    try {
+      for (let i = 0; i < data.switches.length; i++) {
+        const s = data.switches[i], args = ['switch', i + 1, s.tap, s.hold];
+        if (s.tap === 'note' || s.hold === 'note') args.push(clamp(Math.round(+s.note) || 0, 0, 127));
+        await sendCmd(args.join(' '));
+      }
+      await sendCmd('switches');
+      done.push('footswitch assignments');
+    } catch (e) { failed.push('footswitches: ' + e.message); }
+  }
+  if (data.layout && choose.layout) {
+    try { layout.name = 'Song'; layoutApply(data.layout); done.push('panel layout'); }
+    catch (e) { failed.push('layout: ' + e.message); }
+  }
+  return { done, failed };
+}
+
+/* ---- the Song panel + its two modal flows ---- */
+function songModalEl() {
+  let m = $('#songModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'songModal'; m.className = 'modal'; m.hidden = true;
+    m.innerHTML = '<div class="modal-card" role="dialog" aria-modal="true" aria-label="Song session"><div id="songModalBody"></div></div>';
+    m.addEventListener('click', e => { if (e.target === m) m.hidden = true; });
+    document.body.appendChild(m);
+  }
+  return m;
+}
+function songModalShow(body) { const m = songModalEl(); $('#songModalBody').replaceChildren(body); m.hidden = false; }
+function songModalClose() { const m = $('#songModal'); if (m) m.hidden = true; }
+function songRow(box, kind, name, note, checked, disabled, label) {
+  const l = document.createElement('label');
+  const c = document.createElement('input'); c.type = 'checkbox'; c.checked = !!checked && !disabled; c.disabled = !!disabled;
+  c.dataset.kind = kind; c.dataset.name = name;
+  const s = document.createElement('span'); s.textContent = label || name;
+  l.append(c, s);
+  if (note) { const n = document.createElement('span'); n.className = 'note'; n.textContent = note; l.appendChild(n); }
+  box.appendChild(l);
+  return c;
+}
+function songCat(host, text) { const d = document.createElement('div'); d.className = 'song-cat'; d.textContent = text; host.appendChild(d); }
+function songMsg(host, kind, text) { const d = document.createElement('div'); d.className = 'song-msg ' + kind; d.textContent = text; host.appendChild(d); }
+
+function songExportOpen() {
+  const body = document.createElement('div');
+  const h = document.createElement('h2'); h.textContent = 'Export a song session'; body.appendChild(h);
+  const sub = document.createElement('div'); sub.className = 'sub';
+  sub.textContent = 'One JSON file carrying whatever you tick. Loops are read from the pedal, so ticking them takes a moment.';
+  body.appendChild(sub);
+  const title = document.createElement('input'); title.type = 'text'; title.style.width = '100%';
+  title.placeholder = 'Song title'; title.value = (current() && current().title) || 'Song';
+  body.appendChild(title);
+  songCat(body, 'Presets (workspace)');
+  const presetBox = document.createElement('div'); presetBox.className = 'song-list'; body.appendChild(presetBox);
+  for (const p of store.state.presets)
+    songRow(presetBox, 'preset', p.id, p.mode === 'custom' ? 'custom routing' : 'chain', p.id === store.state.currentId, false, p.title);
+  songCat(body, 'MIDI files');
+  const midiBox = document.createElement('div'); midiBox.className = 'song-list'; body.appendChild(midiBox);
+  const files = scoreFiles();
+  if (!files.length) songMsg(midiBox, 'warn', 'No MIDI files here yet.');
+  for (const f of files) {
+    const missing = !f.bytes && !midi.netHost;
+    songRow(midiBox, 'midi', f.name, missing ? 're-upload to include' : '', !missing, missing);
+  }
+  songCat(body, 'Loops (from the pedal’s SD card)');
+  const loopBox = document.createElement('div'); loopBox.className = 'song-list'; body.appendChild(loopBox);
+  const loopNames = (link.connected && dev.loops && dev.loops.sd && Array.isArray(dev.loops.loops)) ? dev.loops.loops : [];
+  if (!loopNames.length) songMsg(loopBox, 'warn', link.connected ? 'No loops on the card (or no card).' : 'Connect the pedal to include saved loops.');
+  for (const n of loopNames) songRow(loopBox, 'loop', n, '', false);
+  songCat(body, 'Also carry');
+  const extraBox = document.createElement('div'); extraBox.className = 'song-list'; body.appendChild(extraBox);
+  const cPlay = songRow(extraBox, 'extra', 'playback', 'speed · transpose · mute/solo · A/B · loop', true, false, 'Playback preferences');
+  const cSw = songRow(extraBox, 'extra', 'switches', link.connected && dev.switches ? '' : 'connect the pedal to read them', !!(link.connected && dev.switches), !(link.connected && dev.switches), 'Footswitch assignments');
+  const cLay = songRow(extraBox, 'extra', 'layout', 'how the panels are arranged', false, false, 'Panel layout');
+  const msg = document.createElement('div'); body.appendChild(msg);
+  const row = document.createElement('div'); row.className = 'actions-row';
+  const go = document.createElement('button'); go.className = 'btn accent'; go.textContent = 'Export';
+  const cancel = document.createElement('button'); cancel.className = 'btn'; cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', songModalClose);
+  row.append(go, cancel); body.appendChild(row);
+  go.addEventListener('click', async () => {
+    const picked = kind => [...body.querySelectorAll(`input[data-kind="${kind}"]:checked`)].map(c => c.dataset.name);
+    const sel = { title: title.value.trim() || 'Song', presets: picked('preset'), midi: picked('midi'), loops: picked('loop'),
+                  playback: cPlay.checked, switches: cSw.checked, layout: cLay.checked };
+    go.disabled = true; msg.replaceChildren(); songMsg(msg, 'ok', sel.loops.length ? 'Reading loops from the pedal…' : 'Packing…');
+    try {
+      const pkg = await sessionBuild(sel);
+      const json = JSON.stringify(pkg);
+      const fname = (sanitizeFileName(sel.title).replace(/\.txt$/, '') || 'song') + '.glsong.json';
+      saveBlob(new Blob([json], { type: 'application/json' }), fname);
+      consoleLog('ok', `Exported ${fname} (${fmtBytes(json.length)}: ${pkg.presets.length} presets, ${pkg.midiFiles.length} MIDI, ${pkg.loops.length} loops)`);
+      songModalClose();
+    } catch (e) {
+      msg.replaceChildren(); songMsg(msg, 'err', 'Export failed: ' + e.message);
+      go.disabled = false;
+    }
+  });
+  songModalShow(body);
+}
+
+function songImportOpen(text, fileName) {
+  let pkg;
+  try { pkg = JSON.parse(text); }
+  catch (e) { consoleLog('err', `${fileName}: not JSON — not a song session`); return; }
+  const v = sessionValidate(pkg);
+  const body = document.createElement('div');
+  const h = document.createElement('h2'); h.textContent = 'Open song session'; body.appendChild(h);
+  const sub = document.createElement('div'); sub.className = 'sub';
+  sub.textContent = `${fileName}${v.data.title ? ' — ' + v.data.title : ''}${pkg && pkg.created ? ' · ' + String(pkg.created).slice(0, 10) : ''}`;
+  body.appendChild(sub);
+  if (!v.ok) {
+    songMsg(body, 'err', 'Nothing was changed. The file cannot be used:');
+    for (const e of v.errors.slice(0, 12)) songMsg(body, 'err', e);
+    if (v.errors.length > 12) songMsg(body, 'err', `…and ${v.errors.length - 12} more.`);
+    const row = document.createElement('div'); row.className = 'actions-row';
+    const close = document.createElement('button'); close.className = 'btn'; close.textContent = 'Close';
+    close.addEventListener('click', songModalClose);
+    row.appendChild(close); body.appendChild(row);
+    songModalShow(body);
+    return;
+  }
+  for (const wmsg of v.warnings) songMsg(body, 'warn', wmsg);
+  const d = v.data;
+  if (d.presets.length) {
+    songCat(body, 'Presets — added to the workspace (existing ones are never touched)');
+    const box = document.createElement('div'); box.className = 'song-list'; body.appendChild(box);
+    for (const p of d.presets) songRow(box, 'preset', p.title, p.mode === 'custom' ? 'custom routing' : 'chain', true);
+  }
+  const midiHere = scoreFiles().map(f => f.name);
+  if (d.midi.length) {
+    songCat(body, midi.netHost ? 'MIDI files — uploaded to the Pi' : 'MIDI files — kept in this browser');
+    const box = document.createElement('div'); box.className = 'song-list'; body.appendChild(box);
+    for (const f of d.midi)
+      songRow(box, 'midi', f.name, midiHere.includes(f.name) ? `exists — saved as ${dedupeName(f.name, midiHere)}` : fmtBytes(f.bytes.length), true);
+  }
+  const loopsReady = !!(link.connected && dev.loops && dev.loops.sd);
+  if (d.loops.length) {
+    songCat(body, 'Loops — written to the pedal’s SD card only if ticked');
+    const box = document.createElement('div'); box.className = 'song-list'; body.appendChild(box);
+    const here = loopsReady ? dev.loops.loops : [];
+    for (const f of d.loops)
+      songRow(box, 'loop', f.name,
+              !loopsReady ? 'connect the pedal (with its SD card) first'
+              : here.includes(loopFileName(f.name)) ? `exists — saved as ${dedupeName(loopFileName(f.name), here)}` : fmtBytes(f.bytes.length),
+              false, !loopsReady);
+  }
+  songCat(body, 'Also apply');
+  const extraBox = document.createElement('div'); extraBox.className = 'song-list'; body.appendChild(extraBox);
+  let cPlay = null, cSw = null, cLay = null;
+  if (d.playback)
+    cPlay = songRow(extraBox, 'extra', 'playback',
+      [d.playback.file, d.playback.speed && d.playback.speed !== 1 ? d.playback.speed + '×' : '',
+       d.playback.transpose ? (d.playback.transpose > 0 ? '+' : '') + d.playback.transpose + ' st' : ''].filter(Boolean).join(' · '),
+      true, false, 'Playback preferences');
+  if (d.switches)
+    cSw = songRow(extraBox, 'extra', 'switches', link.connected ? 'writes the six switch rows to the pedal' : 'connect the pedal first',
+                  false, !link.connected, 'Footswitch assignments');
+  if (d.layout)
+    cLay = songRow(extraBox, 'extra', 'layout', 'rearranges the panels here', false, false, 'Panel layout');
+  if (!extraBox.children.length) extraBox.remove();
+  let cReplace = null;
+  if (d.midi.length || d.loops.length) {
+    const box = document.createElement('div'); box.className = 'song-list'; body.appendChild(box);
+    cReplace = songRow(box, 'opt', 'replace', 'otherwise clashing names are renamed', false, false, 'Replace files that already exist');
+  }
+  const msg = document.createElement('div'); body.appendChild(msg);
+  const row = document.createElement('div'); row.className = 'actions-row';
+  const go = document.createElement('button'); go.className = 'btn accent'; go.textContent = 'Apply ticked items';
+  const cancel = document.createElement('button'); cancel.className = 'btn'; cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', songModalClose);
+  row.append(go, cancel); body.appendChild(row);
+  go.addEventListener('click', async () => {
+    const picked = kind => new Set([...body.querySelectorAll(`input[data-kind="${kind}"]:checked`)].map(c => c.dataset.name));
+    const choose = { presets: picked('preset'), midi: picked('midi'), loops: picked('loop'),
+                     playback: !!(cPlay && cPlay.checked), switches: !!(cSw && cSw.checked), layout: !!(cLay && cLay.checked),
+                     replace: !!(cReplace && cReplace.checked) };
+    go.disabled = true; msg.replaceChildren(); songMsg(msg, 'ok', 'Applying…');
+    const res = await sessionApply(d, choose);
+    for (const line of res.done) consoleLog('ok', 'Session: ' + line);
+    for (const line of res.failed) consoleLog('err', 'Session: ' + line);
+    msg.replaceChildren();
+    if (res.failed.length) { for (const f of res.failed.slice(0, 8)) songMsg(msg, 'err', f); go.disabled = false; }
+    if (res.done.length) songMsg(msg, 'ok', `Applied: ${res.done.length} item${res.done.length === 1 ? '' : 's'}.`);
+    if (!res.failed.length) setTimeout(songModalClose, 900);
+  });
+  songModalShow(body);
+}
+
+function songBuildSection() {
+  const sec = document.createElement('div'); sec.className = 'dev-sec coll'; sec.id = 'songSec';
+  sec.dataset.title = 'Song session';
+  sec.innerHTML = `<h3 role="button" tabindex="0"><span class="caret">&#9660;</span> SONG SESSION</h3>
+  <div class="sec-body">
+    <div class="play-hint">Everything a song needs — MIDI files, presets, loops, playback settings, footswitches — travels in one file.</div>
+    <div class="actions-row">
+      <button class="btn sm" id="songExportBtn" title="Pack the ticked pieces of this workspace into one shareable file">Export song&#8230;</button>
+      <button class="btn sm" id="songImportBtn" title="Open a song session — everything is checked before anything is applied">Open song&#8230;</button>
+    </div>
+    <input type="file" id="songImportInput" accept=".json,.glsong" hidden>
+  </div>`;
+  const after = $('#scoreSec') || $('#chanSec') || $('#device').lastElementChild;
+  after.insertAdjacentElement('afterend', sec);
+  sec.querySelector('h3').addEventListener('click', () => sec.classList.toggle('closed'));
+  $('#songExportBtn').addEventListener('click', songExportOpen);
+  $('#songImportBtn').addEventListener('click', () => $('#songImportInput').click());
+  $('#songImportInput').addEventListener('change', async ev => {
+    const f = ev.target.files[0]; ev.target.value = '';
+    if (!f) return;
+    if (f.size > SONG_LIMITS.total) { consoleLog('err', `${f.name} is ${fmtBytes(f.size)} — sessions are capped at ${fmtBytes(SONG_LIMITS.total)}`); return; }
+    songImportOpen(await f.text(), f.name);
+  });
 }
 
 /* ---- the panel ---- */
@@ -6880,7 +7690,8 @@ function midiBuildSection() {
       consoleLog(j.ok ? 'ok' : 'err', j.ok ? `Uploaded ${name} (${j.length_s} s)` : `Upload failed: ${j.message || r.status}`);
       midiRefreshFiles();
     } else {
-      midi.local = midi.local.filter(x => x.name !== name).concat([{ name, length: parsed.length, events: parsed.events, uses: midiUsage(parsed.events), parsed }]);
+      // bytes kept so a song session can carry the file (NEW)
+      midi.local = midi.local.filter(x => x.name !== name).concat([{ name, length: parsed.length, events: parsed.events, uses: midiUsage(parsed.events), parsed, bytes: new Uint8Array(buf) }]);
       scoreSync();
       consoleLog('ok', `${name} loaded (${parsed.length.toFixed(1)} s) — plays from this browser over Web MIDI`);
       midiPaint();
@@ -6949,7 +7760,8 @@ function midiPaintRows(rows, tr, st, sig) {
         if (tr === 'bridge') { await midiApi('/api/midi/stop', {}); midi.status = await midiApi('/api/midi/status'); } else midiLocalStop();
         midiPaint(); return;
       }
-      if (tr === 'bridge') { const j = await midiApi('/api/midi/play', { file: f.name, loop: midi.loop }); consoleLog(j.ok ? 'ok' : 'err', j.message || ''); midi.status = await midiApi('/api/midi/status'); midiPaint(); }
+      // playback starts with the score's current controls (speed, transpose, mute/solo, A/B) — NEW
+      if (tr === 'bridge') { const j = await midiApi('/api/midi/play', Object.assign({ file: f.name, loop: midi.loop }, f.name === score.file ? scoreCtlParams() : {})); consoleLog(j.ok ? 'ok' : 'err', j.message || ''); midi.status = await midiApi('/api/midi/status'); midiPaint(); }
       else midiLocalPlay(f, midi.loop);
     });
     row.appendChild(play);
@@ -9388,6 +10200,7 @@ function init() {
   midiBuildSection();
   chanBuildSection();
   scoreBuildSection();
+  songBuildSection();                            // song sessions (NEW)
   sysBuildSection();
   diagBuildSection();                           // GLS-DIAG: the "no sound?" panel
   // Served by the companion Pi: a plain link to its setup page, right next to the connection pill

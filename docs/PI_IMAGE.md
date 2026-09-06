@@ -134,3 +134,9 @@ account names use *looper* throughout — the product name changed, the internal
   `systemctl status looper-provision`; apt's own output is in `/var/log/looper-provision.log`.
 - **`loopsmith.local` does not resolve.** Android has no mDNS; use the numeric address from the
   setup page.
+
+### Song sessions and score controls
+
+Studio can export/import song sessions containing selected MIDI files, presets,
+optional saved loops and playback/layout settings. See [song sessions](SONG_SESSIONS.md)
+for the explicit import choices and playback controls.
