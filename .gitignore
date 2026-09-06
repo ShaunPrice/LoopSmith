@@ -9,3 +9,5 @@ __pycache__/
 
 # Host timing test executable
 firmware/test/host/test_timing
+
+firmware/test/host/test_looper
