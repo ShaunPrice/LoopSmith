@@ -90,12 +90,13 @@ table{width:100%;border-collapse:collapse;font-size:14px}td{padding:6px 0;border
   <div class="row"><span>Installed</span><span id="sw-ver">…</span></div>
   <div class="row"><span>Updates</span><span id="sw-upd">—</span></div>
   <div class="actions">
+    <button id="sw-rollback" hidden>Restore previous app</button>
     <button id="sw-check">Check for updates</button>
     <button id="sw-upload">Upload a bundle…</button>
     <input type="file" id="sw-file" accept=".gz,.tgz,application/gzip" hidden>
     <button id="sw-apply" class="primary" hidden>Install</button>
   </div>
-  <div class="msg" id="sw-msg">Updates come from a bundle you upload here or drop on the USB drive, or are fetched from the address set in <b>looper.conf</b>. Security patches for the operating system are applied on their own overnight.</div>
+  <div class="msg" id="sw-msg">Updates come from a bundle you upload here or drop on the USB drive, or are fetched from the address set in <b>looper.conf</b>. Operating-system package updates run overnight. App rollback restores app and service files; it does not undo OS updates.</div>
 </section>
 <section id="login">
   <h2><span class="dot on"></span>Login</h2>
@@ -217,8 +218,11 @@ const post = (u, b) => fetch(u, { method: 'POST', headers: { 'Content-Type': 'ap
 async function swRefresh() {
   try {
     const st = await j('/api/update/status');
+    $('sw-rollback').hidden = !st.rollback_available;
+    $('sw-rollback').disabled = !!st.busy;
     $('sw-ver').textContent = st.version ? 'v' + st.version : '—';
     let t = st.busy ? 'installing…' : (st.message || (st.available ? `v${st.latest} available (${st.source})` : (st.detail || 'press check')));
+    if (st.transaction && (st.busy || !st.detail)) t = st.transaction.message || t;
     if (st.os_reboot_required) t += ' · system updates need a restart';
     $('sw-upd').textContent = t;
     $('sw-apply').hidden = !(st.available && !st.busy);
@@ -226,6 +230,12 @@ async function swRefresh() {
     $('sw-check').disabled = !!st.busy;
   } catch (e) {}
 }
+$('sw-rollback').onclick = async () => {
+  if (!confirm('Restore the previous app and its service files? Your MIDI, loops and login stay in place. The screen will reconnect. OS updates are not undone.')) return;
+  $('sw-rollback').disabled = true;
+  try { const r = await post('/api/update/rollback'); $('sw-upd').textContent = r.message || 'Restoring…'; }
+  catch (e) { $('sw-upd').textContent = 'Connection interrupted; check update status after reconnecting.'; }
+};
 $('sw-check').onclick = async () => { $('sw-check').disabled = true; $('sw-upd').textContent = 'checking…'; try { await post('/api/update/check'); } catch (e) {} $('sw-check').disabled = false; swRefresh(); };
 $('sw-upload').onclick = () => $('sw-file').click();
 $('sw-file').onchange = async ev => {

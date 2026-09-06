@@ -21,7 +21,7 @@ cp -r "$REPO"/pi/www "$S/app/pi/"
 cp -r "$HERE"/splash "$S/app/"
 cp -r "$REPO"/midi "$S/app/midi"
 cp "$REPO"/editor/index.html "$S/app/editor/"
-for f in looper-net.py provision.sh kiosk.sh usb-mount.sh midi-connect.sh looper-update.sh looper-admin.sh; do cp "$HERE/$f" "$S/app/pi/"; done
+for f in looper-net.py provision.sh kiosk.sh usb-mount.sh midi-connect.sh looper-update.sh looper-admin.sh update_transaction.py; do cp "$HERE/$f" "$S/app/pi/"; done
 cp "$HERE"/*.service "$HERE"/*.timer "$S/units/" 2>/dev/null || true
 sed -e "s/__USER__/looper/" -e "s|--editor /opt/looper/editor|--editor /opt/looper/editor --www /opt/looper/pi/www --storage /media/usb|" \
     "$REPO/pi/looper-bridge.service" > "$S/units/looper-bridge.service"

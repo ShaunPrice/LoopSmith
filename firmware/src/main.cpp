@@ -32,11 +32,25 @@ static void pollMidi()
         uint8_t type = usbMIDI.getType();
         if (type == usbMIDI.NoteOn || type == usbMIDI.NoteOff) {
             uint8_t ch = usbMIDI.getChannel(), n = usbMIDI.getData1(), v = usbMIDI.getData2();
+            pedal.midiRxNotes++;
             if (type == usbMIDI.NoteOn && v > 0) pedal.patch.noteOn(ch, n, v / 127.0f);
             else pedal.patch.noteOff(ch, n);
         } else if (type == usbMIDI.ProgramChange) {
             String err;
             pedal.loadPresetByIndex(usbMIDI.getData1(), err);
+        } else if (type == usbMIDI.Clock) {
+            // 24 PPQN: every 24th tick is a beat; the follower smooths the tempo
+            if (pedal.midiClock.onTick(micros()))
+                pedal.patch.looper.syncExtBeat(pedal.midiClock.samplesPerBeat());
+        } else if (type == usbMIDI.Start) {
+            pedal.midiClock.onStart(micros());
+            pedal.patch.looper.syncExtStart();
+        } else if (type == usbMIDI.Continue) {
+            pedal.midiClock.onContinue(micros());
+            pedal.patch.looper.syncExtContinue();
+        } else if (type == usbMIDI.Stop) {
+            pedal.midiClock.onStop();
+            pedal.patch.looper.syncExtStop();
         } else if (type == usbMIDI.ControlChange) {
             uint8_t cc = usbMIDI.getData1(), v = usbMIDI.getData2();
             AudioEffectLooper &lp = pedal.patch.looper;
@@ -97,7 +111,9 @@ void loop()
     AudioEffectLooper &lp = pedal.patch.looper;
     bool running = (lp.state() == AudioEffectLooper::RECORDING ||
                     lp.state() == AudioEffectLooper::PLAYING ||
-                    lp.state() == AudioEffectLooper::OVERDUBBING);
+                    lp.state() == AudioEffectLooper::OVERDUBBING ||
+                    lp.state() == AudioEffectLooper::ARMED ||     // STOP-on-press also
+                    lp.state() == AudioEffectLooper::COUNT_IN);   // cancels an armed take
 
     // Time-critical actions fire on the press edge; the rest fire on release
     // when the switch also has a hold action (so tap and hold can be told
@@ -145,6 +161,10 @@ void loop()
     proto.poll();
 #if defined(MIDI_INTERFACE)
     pollMidi();
+    // A vanished MIDI clock must never leave a take armed: treat it as a Stop
+    // (an in-progress fixed-length recording still closes, on the flywheel).
+    if (pedal.midiClock.checkTimeout(micros()))
+        pedal.patch.looper.syncExtStop();
 #endif
     pedal.patch.pollUsbVolume();
     pedal.store.poll();

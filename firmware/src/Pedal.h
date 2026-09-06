@@ -8,14 +8,17 @@
 #include "PatchManager.h"
 #include "PresetStore.h"
 #include "Actions.h"
+#include "MidiClockIn.h"
 
 class Pedal {
 public:
     PatchManager patch;
     PresetStore  store;
+    MidiClockIn  midiClock;     // USB MIDI clock follower (idle in serial-only builds)
 
     int    presetIndex = -1;    // -1 = none loaded (or a live-applied patch)
     String lastWarnings;
+    uint32_t midiRxNotes = 0;   // USB MIDI note on/off received (diagnostics evidence)
     SwitchConfig switches[NUM_SWITCHES] = {
         {ACT_LOOP, ACT_NONE, 0}, {ACT_STOP, ACT_CLEAR, 0}, {ACT_UNDO, ACT_NONE, 0},
         {ACT_NEXT, ACT_RELOAD, 0}, {ACT_PREV, ACT_NONE, 0}, {ACT_BYPASS, ACT_NONE, 0}};
@@ -190,6 +193,7 @@ public:
 
     void poll()
     {
+        patch.pollTone();                // auto-stop for the diagnostic test tone
         // The EEPROM emulation programs flash with interrupts off, which can
         // drop audio blocks — so only write while the looper is idle.
         AudioEffectLooper::State s = patch.looper.state();

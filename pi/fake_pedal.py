@@ -5,8 +5,9 @@ Studio editor and the bridge with no hardware attached.
 
 It opens a pseudo-terminal, prints the device path, and speaks docs/PROTOCOL.md:
 ping / status / monitor / list / load / next / prev / get / put / apply / rm /
-bypass / vol / looper / note / switches / switch / loops / loop / help, with the
-real counted-byte framing (loop files up to 8 MB).
+bypass / vol / looper / note / switches / switch / loops / loop / tone / help,
+with the real counted-byte framing (loop files up to 8 MB) and the 2.2.2
+diagnostics extensions (patch rev, test tone, MIDI counters).
 
     python3 fake_pedal.py            # prints e.g. /dev/pts/3 (Linux) or /dev/ttys004 (macOS)
     python3 looper_bridge.py --port /dev/pts/3
@@ -26,8 +27,9 @@ import sys
 import time
 import tty
 
-FW = "2.0.0"
+FW = "2.2.2"
 MAX_BYTES = 16384
+TONE_MS_MIN, TONE_MS_MAX, TONE_MS_DEFAULT = 100, 5000, 1000
 MAX_LOOP_BYTES = 8 * 1024 * 1024
 LOOP_SECONDS_MAX = 95.0
 LOOP_RATE = 44100
@@ -47,6 +49,17 @@ def make_sine_wav(seconds=2.0, freq=220.0, rate=LOOP_RATE, amp=0.5):
     header = struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 36 + len(frames), b"WAVE",
                          b"fmt ", 16, 1, 1, rate, rate * 2, 2, 16, b"data", len(frames))
     return bytes(header + frames)
+
+
+def patch_fp(data):
+    """Exact running-patch identity, like the firmware: 32-bit FNV-1a over the
+    raw bytes plus their length ("hhhhhhhh-len"). Empty string = no patch."""
+    if not data:
+        return ""
+    h = 2166136261
+    for b in data:
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return "%08x-%d" % (h, len(data))
 
 
 def wav_seconds(data):
@@ -89,6 +102,17 @@ class FakePedal:
         self.loops = {}               # name -> WAV bytes (the /loops folder of the SD card)
         self.last_status = 0.0
         self.peak = 0.0
+        # diagnostics (firmware 2.2.2): patch revision, test tone, MIDI evidence
+        self.rev = 1 if self.presets else 0   # the boot-time preset load counts
+        self.applied = None                   # live-applied patch text (index -1)
+        # fp is a SNAPSHOT of the bytes that were loaded/applied — a later `put`
+        # under the same name must not change it (the file changed, not the
+        # running patch); only load/apply do.
+        self.fp = patch_fp(self.presets.get(self.name(), b"")) if self.presets else ""
+        self.tone_until = 0.0                 # time.time() deadline, 0 = off
+        self.midi_rx = 0                      # note on/off received
+        self.midi_trig = 0                    # voices actually triggered
+        self.output_muted = False
 
     # ----------------------------------------------------------- helpers
     def names(self):
@@ -102,6 +126,14 @@ class FakePedal:
         m = re.search(rb"//\s*name:\s*(.*)", self.presets.get(name, b""))
         return m.group(1).decode(errors="replace").strip() if m else ""
 
+    def tone_active(self):
+        return self.tone_until > time.time()
+
+    def voices(self):
+        """MIDI-bound voices in the running patch — obj.midi(...) calls."""
+        text = self.applied if self.applied is not None else self.presets.get(self.name(), b"")
+        return len(re.findall(rb"\.midi\s*\(", text))
+
     def status_json(self):
         pos = 0.0
         if self.loop_state in ("playing", "overdubbing") and self.loop_len > 0:
@@ -109,13 +141,16 @@ class FakePedal:
         self.peak = 0.15 + 0.6 * abs(((time.time() * 1.7) % 2.0) - 1.0)
         return json.dumps({
             "cpu": round(6.0 + 3.0 * self.peak, 1), "cpu_max": 19.8, "mem": 14, "mem_max": 22,
-            "peak_in": round(self.peak, 3), "peak_out": round(self.peak * 0.9, 3),
+            "peak_in": round(self.peak, 3), "peak_out": 0 if self.output_muted else round(self.peak * 0.9, 3),
+            "output_muted": self.output_muted,
             "loop": {"state": self.loop_state, "len_s": round(self.loop_len, 2),
                      "pos_s": round(pos, 2), "can_undo": self.can_undo, "seconds_max": 95.0},
             "preset": {"index": self.index, "count": len(self.presets),
                        "name": self.name(), "title": self.title_of(self.name())},
-            "bypass": self.bypass, "volume": round(self.volume, 2),
+            "bypass": self.bypass, "volume": round(self.volume, 2), "source": "line",
             "psram_mb": 16, "sd": True, "flash": True,
+            "rev": self.rev, "fp": self.fp, "tone": self.tone_active(),
+            "midi": {"rx": self.midi_rx, "trig": self.midi_trig, "voices": self.voices()},
         }, separators=(",", ":"))
 
     # ------------------------------------------------------------ looper
@@ -133,6 +168,9 @@ class FakePedal:
                 self.loop_state, self.can_undo = "playing", True
             elif s == "stopped":
                 self.loop_state, self.loop_t0 = "playing", time.time()
+        elif cmd == "halt":
+            if s not in ("empty", "stopped"):
+                self.looper("stop")
         elif cmd == "stop":
             if s == "recording":
                 self.loop_len = max(0.1, time.time() - self.loop_t0)
@@ -171,7 +209,10 @@ class FakePedal:
                     out(b"#OK loop put\n")
                 else:
                     self.index = -1
-                    out(b"#OK apply\n")
+                    self.applied = payload
+                    self.rev += 1
+                    self.fp = patch_fp(payload)
+                    out(f"#OK apply rev={self.rev} fp={self.fp}\n".encode())
                 continue
             nl = self.buf.find(b"\n")
             if nl < 0:
@@ -188,6 +229,10 @@ class FakePedal:
         say = lambda s: out((s + "\n").encode())
         if cmd == "ping":
             say(f'#PONG {{"fw":"{FW}","proto":1,"psram_mb":16,"sd":true,"flash":true}}')
+        elif cmd in ("panic", "resume"):
+            self.output_muted = cmd == "panic"
+            if self.output_muted: self.looper("halt")
+            say("#OK output")
         elif cmd == "status":
             say("#STATUS " + self.status_json())
         elif cmd == "monitor":
@@ -205,14 +250,20 @@ class FakePedal:
             else:
                 say("#ERR no such preset")
                 return
-            say(f"#OK load {self.name()}")
+            self.applied = None
+            self.rev += 1
+            self.fp = patch_fp(self.presets[self.name()])
+            say(f"#OK load {self.name()} rev={self.rev} fp={self.fp}")
         elif cmd in ("next", "prev"):
             n = len(self.presets)
             if not n:
                 say("#ERR no presets")
                 return
             self.index = (self.index + (1 if cmd == "next" else -1)) % n
-            say(f"#OK load {self.name()}")
+            self.applied = None
+            self.rev += 1
+            self.fp = patch_fp(self.presets[self.name()])
+            say(f"#OK load {self.name()} rev={self.rev} fp={self.fp}")
         elif cmd == "get" and len(argv) > 1:
             data = self.presets.get(argv[1])
             if data is None:
@@ -252,7 +303,30 @@ class FakePedal:
             # note on <num> <vel> [ch] / note off <num> [ch] — drives the MIDI voice allocator
             ok = len(argv) >= 3 and argv[1] in ("on", "off") and argv[2].isdigit() and (
                 argv[1] == "off" or (len(argv) >= 4 and argv[3].isdigit()))
+            if ok:
+                self.midi_rx += 1
+                # a voice fires only when the running patch has one bound (like triggerUnit)
+                if argv[1] == "on" and int(argv[3]) > 0 and self.voices():
+                    self.midi_trig += 1
             say("#OK note" if ok else "#ERR usage: note on <num> <vel> [ch] | note off <num> [ch]")
+        elif cmd == "tone":
+            # tone [ms] [freq] [level] | tone off — quiet self-stopping test tone
+            a = argv[1] if len(argv) > 1 else ""
+            if a in ("off", "stop"):
+                self.tone_until = 0.0
+                say("#OK tone off")
+                return
+            try:
+                ms = int(a) if a else TONE_MS_DEFAULT
+            except ValueError:
+                say("#ERR tone [ms] [freq] [level] | tone off")
+                return
+            if ms <= 0:
+                say("#ERR tone [ms] [freq] [level] | tone off")
+                return
+            ms = min(TONE_MS_MAX, max(TONE_MS_MIN, ms))
+            self.tone_until = time.time() + ms / 1000.0
+            say(f"#OK tone {ms}")
         elif cmd == "switches":
             say("#SWITCHES " + json.dumps({"switches": self.switches, "actions": SWITCH_ACTIONS},
                                            separators=(",", ":")))
@@ -279,7 +353,7 @@ class FakePedal:
             self.loop_cmd(argv[1:], out, say)
         elif cmd == "help":
             say("fake pedal: ping status monitor list load next prev get put apply rm bypass vol "
-                "looper note switches switch loops loop")
+                "looper note switches switch loops loop tone")
         else:
             say("#ERR unknown command")
 
@@ -344,6 +418,10 @@ class FakePedal:
         if st != getattr(self, "_last_evt", None):
             self._last_evt = st
             out(f'#EVT {{"loop":"{st}"}}\n'.encode())
+        tone = self.tone_active()
+        if tone != getattr(self, "_last_tone", False):
+            self._last_tone = tone
+            out(f'#EVT {{"tone":{"true" if tone else "false"}}}\n'.encode())
 
 
 def main():

@@ -36,6 +36,9 @@ public:
     // Tear down the dynamic chain (bypass stays engaged until the next load).
     void unloadPatch();
 
+    void   setOutputMuted(bool muted) { outputMuted_ = muted; outputGate.gain(muted ? 0.0f : 1.0f); recordGate.gain(muted ? 0.0f : 1.0f); if (muted) toneStop(); }
+    bool   outputMuted() const { return outputMuted_; }
+    void   allNotesOff();
     void   setBypass(bool on);
     bool   bypassed() const { return bypass_; }
     void   setVolume(float v);          // 0..1 headphone volume
@@ -66,6 +69,35 @@ public:
     void  noteOn(uint8_t channel, uint8_t note, float velocity);
     void  noteOff(uint8_t channel, uint8_t note);
     int   voiceCount() const { return (int)voices_.size(); }
+
+    // Diagnostics evidence (see docs/PROTOCOL.md "#STATUS payload"):
+    // patchRev() counts successful patch loads/applies so a UI can tell "the
+    // running patch changed" apart from "the same patch is still running";
+    // noteTriggers() counts voices actually triggered — evidence a note made
+    // it through the allocator, not merely that MIDI was transmitted.
+    uint32_t patchRev() const { return patchRev_; }
+    uint32_t noteTriggers() const { return noteTriggers_; }
+
+    // Exact identity of the running patch: FNV-1a (32-bit) over the raw bytes
+    // that were successfully applied, plus their length ("hhhhhhhh-len").
+    // A revision counter alone cannot prove that a file read back by name
+    // still equals the running patch (the file may have been overwritten
+    // without a reload) — this can. Empty when no patch is running (boot,
+    // or the dry-bypass fallback after a rare mid-apply failure).
+    String patchFp() const {
+        if (!patchFpLen_) return "";
+        char b[24];
+        snprintf(b, sizeof(b), "%08lx-%lu", (unsigned long)patchFpHash_, (unsigned long)patchFpLen_);
+        return String(b);
+    }
+
+    // Diagnostic test tone: a quiet sine mixed in AFTER the preset graph and
+    // the USB recording tap, so the running patch, the loop and recordings are
+    // untouched and the tone stops by itself (pollTone(), called every loop).
+    bool  toneStart(uint32_t ms, float freq, float level);
+    void  toneStop();
+    bool  toneActive() const { return toneOn_; }
+    void  pollTone();
 
     AudioEffectLooper looper;           // public: the UI drives it directly
 
@@ -119,6 +151,11 @@ private:
     AudioMixer4          fxOut;         // PatchScript endpoint "fxout"
     AudioMixer4          bypassMix;     // 0: wet chain, 1: dry
     AudioMixer4          outMix;        // 0: live, 1: looper
+    AudioMixer4          monitorMix_;   // 0: outMix (everything), 1: test tone
+    AudioSynthWaveformSine testTone_;   // diagnostic tone (amplitude 0 when idle)
+    AudioAmplifier       outputGate;
+    AudioAmplifier       recordGate;
+    bool                 outputMuted_ = false;
     AudioOutputI2S       i2sOut;
     AudioAnalyzePeak     peakIn_;
     AudioAnalyzePeak     peakOut_;
@@ -143,4 +180,10 @@ private:
     bool   bypass_ = true;              // dry until a patch loads
     float  volume_ = DEFAULT_VOLUME;
     float  lastPeakIn_ = 0, lastPeakOut_ = 0;
+    uint32_t patchRev_ = 0;             // bumped on every successful loadPatch
+    uint32_t patchFpHash_ = 0;          // FNV-1a of the running patch's bytes
+    uint32_t patchFpLen_ = 0;           // ... and their count (0 = no patch)
+    uint32_t noteTriggers_ = 0;         // bumped whenever a voice unit fires
+    bool     toneOn_ = false;
+    uint32_t toneOffAt_ = 0;            // millis() deadline for the auto-stop
 };

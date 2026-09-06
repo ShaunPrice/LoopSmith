@@ -42,6 +42,7 @@ import glob
 import hashlib
 import hmac
 import json
+import math
 import os
 import shutil
 import struct
@@ -592,7 +593,7 @@ class WebAuth:
             return None
 
     def enabled(self):
-        return conf_value("WEB_AUTH", "1") != "0" and self.creds() is not None
+        return conf_value("WEB_AUTH", "1") != "0"
 
     def check(self, user, password):
         c = self.creds()
@@ -836,6 +837,195 @@ class SmfFile:
                 return v, i
 
 
+# ---------------------------------------------------------------------------
+# Score playback controls (NEW): the pure scheduling core behind the player.
+# Mirrored in the editor's createPlayerCore() so the browser player and the
+# Pi player behave identically. Kept free of asyncio/IO so it unit-tests.
+# ---------------------------------------------------------------------------
+DRUM_CH = 9                     # 0-based MIDI channel 10: never transposed
+
+PLAY_SPEED_MIN, PLAY_SPEED_MAX = 0.25, 4.0
+PLAY_TRANSPOSE_MAX = 24         # semitones either way
+
+
+def _finite_number(v):
+    """A real, finite number. bool is an int in Python, but True is not a speed."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def validate_midi_params(req, length=None):
+    """Validate the playback-parameter fields of /api/midi/play and
+    /api/midi/params. Returns (params, None) with only the keys that were
+    present, or (None, message). Nothing is applied unless everything is
+    valid — a bad request changes no state. NaN/Infinity, booleans and
+    fractional transposes are refused (matching the editor's rules)."""
+    if not isinstance(req, dict):
+        return None, "parameters must be an object"
+    out = {}
+    if "speed" in req:
+        v = req["speed"]
+        if not _finite_number(v):
+            return None, "speed must be a number"
+        if not (PLAY_SPEED_MIN <= v <= PLAY_SPEED_MAX):
+            return None, "speed must be between %s and %s" % (PLAY_SPEED_MIN, PLAY_SPEED_MAX)
+        out["speed"] = float(v)
+    if "transpose" in req:
+        v = req["transpose"]
+        if not _finite_number(v) or float(v) != int(v):
+            return None, "transpose must be a whole number of semitones"
+        v = int(v)
+        if abs(v) > PLAY_TRANSPOSE_MAX:
+            return None, "transpose must be within +/-%d semitones" % PLAY_TRANSPOSE_MAX
+        out["transpose"] = v
+    for key in ("mute", "solo"):
+        if key in req:
+            v = req[key]
+            if not isinstance(v, list) or not all(
+                    isinstance(c, int) and not isinstance(c, bool) and 1 <= c <= 16 for c in v):
+                return None, key + " must be a list of channel numbers 1-16"
+            out[key] = sorted(set(v))
+    a = req.get("a") if "a" in req else None
+    b = req.get("b") if "b" in req else None
+    if "a" in req or "b" in req:
+        for name, v in (("a", a), ("b", b)):
+            if v is not None and not _finite_number(v):
+                return None, name + " must be a finite number of seconds or null"
+            if v is not None and (v < 0 or (length is not None and v > length + 0.001)):
+                return None, name + " is outside the file"
+        if (a is None) != (b is None):
+            return None, "a and b must be set (or cleared) together"
+        if a is not None and b - a < 0.05:
+            return None, "the repeat passage must be at least 0.05 s long"
+        out["a"], out["b"] = a, b
+    if "position_s" in req:
+        v = req["position_s"]
+        if not _finite_number(v):
+            return None, "position_s must be a number"
+        if v < 0 or (length is not None and v > length + 0.001):
+            return None, "position_s is outside the file"
+        out["position_s"] = float(v)
+    return out, None
+
+
+class MidiPlayerLogic:
+    """Event scheduling for one loaded file: which bytes go out as source time
+    advances, with mute/solo, melodic transpose (channel 10 excluded), seeks
+    that release held notes and chase controller state, and boundary releases.
+    Times are source seconds — playback speed is the caller's clock concern."""
+
+    def __init__(self, events, length):
+        self.events = events            # [(seconds, bytes)] sorted
+        self.length = length
+        self.i = 0
+        self.held = {}                  # (ch, source note) -> note actually sent
+        self.sustain = set()            # 0-based channels with the damper (CC64) down
+        self.mute = set()               # 1-based channels
+        self.solo = set()
+        self.transpose = 0
+
+    def _audible(self, ch):
+        c = ch + 1
+        return (c in self.solo) if self.solo else (c not in self.mute)
+
+    def _xform(self, msg):
+        """The bytes to send for one file event, or None to drop it."""
+        st = msg[0] & 0xF0
+        ch = msg[0] & 0x0F
+        if st == 0x90 and len(msg) > 2 and msg[2]:                 # note on
+            if not self._audible(ch):
+                return None
+            n = msg[1]
+            if self.transpose and ch != DRUM_CH:
+                n += self.transpose
+                if not 0 <= n <= 127:
+                    return None                                    # transposed off the keyboard
+            self.held[(ch, msg[1])] = n
+            return bytes((msg[0], n, msg[2]))
+        if st in (0x80, 0x90) and len(msg) > 1:                    # note off
+            sent = self.held.pop((ch, msg[1]), None)
+            if sent is None:
+                return None                                        # its note-on never sounded
+            return bytes((msg[0], sent, msg[2] if len(msg) > 2 else 0))
+        if st == 0xB0 and len(msg) > 2 and msg[1] == 64:           # damper pedal: note-offs
+            if msg[2] >= 64:                                       # alone cannot end a note
+                self.sustain.add(ch)                               # while it is down, so the
+            else:                                                  # release path must lift it
+                self.sustain.discard(ch)
+        return bytes(msg)               # CC / program / bend / aftertouch pass through
+
+    def advance(self, to):
+        """Everything due up to source time `to`, transformed. Moves the cursor."""
+        out = []
+        while self.i < len(self.events) and self.events[self.i][0] <= to:
+            m = self._xform(self.events[self.i][1])
+            if m:
+                out.append(m)
+            self.i += 1
+        return out
+
+    def release(self):
+        """Silence everything at a stop, seek or loop boundary. Sustain (CC64)
+        comes up FIRST — a note-off while the damper is down keeps sounding —
+        then the note-offs, then all-notes-off as a backstop."""
+        out = [bytes((0xB0 | ch, 64, 0)) for ch in range(16)]
+        self.sustain.clear()
+        out.extend(bytes((0x80 | ch, sent, 0)) for (ch, _src), sent in self.held.items())
+        self.held.clear()
+        out.extend(bytes((0xB0 | ch, 123, 0)) for ch in range(16))
+        return out
+
+    def set_filters(self, mute=None, solo=None, transpose=None):
+        """Change mute/solo/transpose live. Returns note-offs for held notes the
+        new filters silence (lifting a down damper first, or the offs would not
+        end anything); already-sounding notes keep their pitch (their offs use
+        the note that was actually sent)."""
+        if mute is not None:
+            self.mute = set(mute)
+        if solo is not None:
+            self.solo = set(solo)
+        if transpose is not None:
+            self.transpose = int(transpose)
+        out = []
+        # Released keys may still sound under sustain even with no held keys.
+        for ch in sorted(self.sustain):
+            if not self._audible(ch):
+                out.append(bytes((0xB0 | ch, 64, 0)))
+                self.sustain.discard(ch)
+        for (ch, src), sent in list(self.held.items()):
+            if not self._audible(ch):
+                if ch in self.sustain:
+                    out.append(bytes((0xB0 | ch, 64, 0)))
+                    self.sustain.discard(ch)
+                out.append(bytes((0x80 | ch, sent, 0)))
+                del self.held[(ch, src)]
+        return out
+
+    def seek(self, t):
+        """Move the cursor to source time t. Releases held notes, then replays
+        the latest program change, controller values and pitch bend per channel
+        from the top of the file so the instruments sound right mid-file."""
+        out = self.release()
+        prog, ccs, bend = {}, {}, {}
+        j = 0
+        while j < len(self.events) and self.events[j][0] < t:
+            m = self.events[j][1]
+            st, ch = m[0] & 0xF0, m[0] & 0x0F
+            if st == 0xC0:
+                prog[ch] = m[1]
+            elif st == 0xB0 and len(m) > 2 and m[1] < 120:         # data CCs, not channel-mode
+                ccs[(ch, m[1])] = m[2]
+            elif st == 0xE0 and len(m) > 2:
+                bend[ch] = (m[1], m[2])
+            j += 1
+        out.extend(bytes((0xC0 | ch, p)) for ch, p in sorted(prog.items()))
+        out.extend(bytes((0xB0 | ch, cc, v)) for (ch, cc), v in sorted(ccs.items()))
+        out.extend(bytes((0xE0 | ch, lo, hi)) for ch, (lo, hi) in sorted(bend.items()))
+        # the chase may have put the damper back down — keep tracking honest
+        self.sustain = {ch for (ch, cc), v in ccs.items() if cc == 64 and v >= 64}
+        self.i = j
+        return out
+
+
 class MidiLink:
     """The pedal's MIDI port shared by every /midi browser and the file player."""
 
@@ -850,10 +1040,16 @@ class MidiLink:
         self.player = None           # asyncio task
         self.play_file = None
         self.play_loop = False
-        self.play_started = 0.0
         self.play_length = 0.0
-        self.play_pos = 0.0
-        self.held = set()            # (channel, note) sounding from the player
+        # score playback controls (NEW): speed, A/B repeat, and the pure
+        # scheduling core (mute/solo/transpose/held notes) live in self.logic
+        self.play_speed = 1.0
+        self.play_a = None           # A/B repeat passage, source seconds (both or neither)
+        self.play_b = None
+        self.logic = None            # MidiPlayerLogic while a file is loaded
+        self._src = 0.0              # source-time position at the anchor…
+        self._anchor = 0.0           # …which is this monotonic instant
+        self._wake = None            # asyncio.Event: params/seek changed, recompute now
 
     def midi_dir(self):
         d = os.path.join(self.storage_dir, "midi") if self.storage_dir and os.path.ismount(self.storage_dir) \
@@ -966,13 +1162,20 @@ class MidiLink:
             log(f"MIDI client gone ({peer}, {len(self.clients)} left)")
 
     # -- file player
+    def _pos(self):
+        """Where playback is, in SOURCE seconds (the score's clock): the anchor
+        plus wall time elapsed scaled by the playback speed."""
+        if not (self.player and not self.player.done()):
+            return 0.0
+        return min(self.play_length, self._src + (time.monotonic() - self._anchor) * self.play_speed)
+
     def status(self):
-        pos = self.play_pos
-        if self.player and not self.player.done():
-            pos = (time.monotonic() - self.play_started) % self.play_length if self.play_loop and self.play_length else \
-                  min(self.play_length, time.monotonic() - self.play_started)
+        lg = self.logic
         return {"connected": self.fd is not None, "port": self.dev, "playing": bool(self.player and not self.player.done()),
-                "file": self.play_file, "loop": self.play_loop, "position_s": round(pos, 2), "length_s": round(self.play_length, 2),
+                "file": self.play_file, "loop": self.play_loop, "position_s": round(self._pos(), 2), "length_s": round(self.play_length, 2),
+                "speed": self.play_speed, "transpose": lg.transpose if lg else 0,
+                "mute": sorted(lg.mute) if lg else [], "solo": sorted(lg.solo) if lg else [],
+                "a": self.play_a, "b": self.play_b,
                 "in_events": self.in_events, "out_events": self.out_events, "dir": self.midi_dir()}
 
     def files(self):
@@ -989,58 +1192,126 @@ class MidiLink:
             pass
         return out
 
-    async def play(self, name, loop=False):
-        await self.stop()
+    async def play(self, name, loop=False, params=None):
+        """Load, validate, then start. The whole request — file AND playback
+        parameters, checked against the actual file length — must be good
+        before the current playback is stopped: a refused play changes
+        nothing."""
         if not name or "/" in name or name.startswith("."):
             return False, "bad file name"
         path = os.path.join(self.midi_dir(), name)
         try:
-            smf = SmfFile(open(path, "rb").read())
+            with open(path, "rb") as f:
+                smf = SmfFile(f.read())
         except (OSError, ValueError, struct.error, IndexError) as e:
             return False, f"cannot read {name}: {e}"
         if not smf.events:
             return False, "the file has no notes"
-        self.play_file, self.play_loop, self.play_length = name, bool(loop), max(smf.length, 0.05)
-        self.player = asyncio.ensure_future(self._run(smf))
+        length = max(smf.length, 0.05)
+        checked = None
+        if params:
+            checked, err = validate_midi_params(params, length)
+            if err:
+                return False, err
+        await self.stop()
+        self.play_file, self.play_loop, self.play_length = name, bool(loop), length
+        self.logic = MidiPlayerLogic(smf.events, self.play_length)
+        self.play_speed, self.play_a, self.play_b = 1.0, None, None
+        self._src, self._anchor = 0.0, time.monotonic()
+        self._wake = asyncio.Event()
+        start = 0.0
+        if checked:
+            start = checked.pop("position_s", 0.0)
+            self._apply_params(checked)
+        self.player = asyncio.ensure_future(self._run(start))
         return True, f"{name}: {smf.length:.1f} s, {len(smf.events)} events"
 
-    async def _run(self, smf):
-        try:
-            while True:
-                self.play_started = time.monotonic()
-                for t, msg in smf.events:
-                    delay = self.play_started + t - time.monotonic()
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-                    self._track(msg)
-                    self.send(msg)
-                    for q in list(self.clients.values()):       # browsers see what the player sends
-                        q.put_nowait(msg)
-                self._all_off()
-                if not self.play_loop:
-                    break
-                tail = self.play_started + self.play_length - time.monotonic()
-                if tail > 0:
-                    await asyncio.sleep(tail)
-        except asyncio.CancelledError:
-            self._all_off()
-            raise
-        finally:
-            self.play_pos = 0.0
+    def _emit(self, msg):
+        self.send(msg)
+        for q in list(self.clients.values()):                  # browsers see what the player sends
+            q.put_nowait(msg)
 
-    def _track(self, msg):
-        k = msg[0] & 0xF0
-        if k == 0x90 and len(msg) > 2 and msg[2]:
-            self.held.add((msg[0] & 0x0F, msg[1]))
-        elif k in (0x80, 0x90) and len(msg) > 1:
-            self.held.discard((msg[0] & 0x0F, msg[1]))
+    def _seek_to(self, t):
+        t = max(0.0, min(self.play_length, float(t)))
+        for m in self.logic.seek(t):
+            self._emit(m)
+        self._src, self._anchor = t, time.monotonic()
+
+    async def _run(self, start=0.0):
+        """Position-based scheduler: sleeps in <=50 ms slices towards the next
+        event so live speed/seek/filter changes (and _wake) land promptly, then
+        emits everything due. Loop and A/B boundaries release held notes."""
+        lg = self.logic
+        try:
+            if start > 0:
+                self._seek_to(start)
+            while True:
+                end = self.play_b if self.play_b is not None else self.play_length
+                pos = self._src + (time.monotonic() - self._anchor) * self.play_speed
+                if pos >= end - 1e-9:
+                    for m in lg.advance(end):                  # anything due right at the boundary
+                        self._emit(m)
+                    for m in lg.release():
+                        self._emit(m)
+                    if self.play_b is not None:                # A/B repeat wraps regardless of loop
+                        self._seek_to(self.play_a or 0.0)
+                        continue
+                    if not self.play_loop:
+                        break
+                    self._seek_to(0.0)
+                    continue
+                nxt = lg.events[lg.i][0] if lg.i < len(lg.events) and lg.events[lg.i][0] <= end else end
+                wait = (nxt - pos) / self.play_speed
+                if wait > 0.001:
+                    self._wake.clear()
+                    try:
+                        await asyncio.wait_for(self._wake.wait(), timeout=min(wait, 0.05))
+                    except asyncio.TimeoutError:
+                        pass
+                    continue                                   # recompute: params may have moved
+                for m in lg.advance(min(pos, end)):
+                    self._emit(m)
+        except asyncio.CancelledError:
+            for m in lg.release():
+                self._emit(m)
+            raise
+
+    def _apply_params(self, params):
+        """Apply pre-validated playback parameters to a loaded player."""
+        lg = self.logic
+        if lg is None:
+            return
+        if "speed" in params:
+            # re-anchor first so the elapsed wall time so far keeps its old scale
+            self._src = self._pos() if (self.player and not self.player.done()) else self._src
+            self._anchor = time.monotonic()
+            self.play_speed = params["speed"]
+        if "a" in params:                                      # validated as a pair
+            self.play_a, self.play_b = params["a"], params["b"]
+        filters = {k: params[k] for k in ("mute", "solo", "transpose") if k in params}
+        if filters:
+            for m in lg.set_filters(**filters):
+                self._emit(m)
+        if self._wake:
+            self._wake.set()
+
+    def set_params(self, params):
+        """Live parameter change on the playing (or loaded) file."""
+        self._apply_params(params)
+
+    def seek(self, t):
+        if not (self.player and not self.player.done()):
+            return False, "nothing is playing"
+        self._seek_to(t)
+        if self._wake:
+            self._wake.set()
+        return True, "at %.2f s" % max(0.0, min(self.play_length, float(t)))
 
     def _all_off(self):
-        for ch, n in list(self.held):
-            self.send(bytes([0x80 | ch, n, 0]))
-        self.held.clear()
-        for ch in range(16):                                   # all notes off, every channel
-            self.send(bytes([0xB0 | ch, 123, 0]))
+        """Panic: silence everything, held notes first when a file is loaded."""
+        msgs = self.logic.release() if self.logic else [bytes((0xB0 | ch, 123, 0)) for ch in range(16)]
+        for m in msgs:
+            self.send(m)
 
     async def stop(self):
         if self.player and not self.player.done():
@@ -1089,9 +1360,9 @@ class PiSystem:
             self.update_last = {"available": False, "version": self.app_version(), "detail": out[-200:] or "check failed"}
         return self.update_last
 
-    async def update_apply(self):
+    async def update_apply(self, rollback=False):
         """Install an update in the background. The bridge restarts itself as part of it, so the
-        browser sees the socket drop and reconnect - which is the signal that it worked."""
+        browser reconnects and checks transaction status; reconnect alone is not success."""
         if not os.path.exists(self.UPDATER):
             return False, "no updater installed"
         if await self.update_busy():
@@ -1102,7 +1373,7 @@ class PiSystem:
             os.remove("/run/looper/update-result")
         except OSError:
             pass
-        rc, out = await self._run("systemctl", "start", "--no-block", "looper-update.service", timeout=20)
+        rc, out = await self._run("systemctl", "start", "--no-block", "looper-rollback.service" if rollback else "looper-update.service", timeout=20)
         if rc != 0:
             return False, (out or "systemctl refused").strip().split("\n")[-1][:200]
         self.update_msg = ""
@@ -1111,6 +1382,9 @@ class PiSystem:
 
     async def update_busy(self):
         rc, out = await self._run("systemctl", "is-active", "looper-update.service", timeout=8)
+        if out.strip() in ("activating", "active"):
+            return True
+        rc, out = await self._run("systemctl", "is-active", "looper-rollback.service", timeout=8)
         return out.strip() in ("activating", "active")
 
     # ---- privileged setup actions (looper-admin.service, started through polkit) ----
@@ -1170,7 +1444,13 @@ class PiSystem:
             pass
         st = {"version": self.app_version(), "updater": os.path.exists(self.UPDATER),
               "busy": busy, "message": self.update_msg,
+              "rollback_available": os.path.isfile("/var/lib/looper/update-backup/manifest.json"),
               "os_reboot_required": os.path.exists("/var/run/reboot-required")}
+        try:
+            with open("/var/lib/looper/update-progress.json") as progress:
+                st["transaction"] = json.load(progress)
+        except (OSError, ValueError):
+            pass
         if self.update_last:
             st.update({k: self.update_last.get(k) for k in ("available", "latest", "source", "detail", "checked")})
         return st
@@ -1477,6 +1757,9 @@ class Server:
     CLAIM_PATHS = ("/claim", "/api/claim", "/api/claim/state")
 
     async def route(self, r, w, method, path, headers, body, peer):
+        if path == "/api/health" and WebAuth.is_local(peer):
+            await self._json(w, {"ok": True})
+            return
         # Until someone has set a login, the pedal serves nothing but the claim page.
         if not self.auth.claimed():
             if path == "/claim":
@@ -1518,6 +1801,7 @@ class Server:
                 return
             await self._respond(w, "302 Found", "", "text/plain", ["Location: /claim"])
             return
+
 
         # Browsers that are not the pedal's own screen must be signed in.
         if self.auth.enabled() and not WebAuth.is_local(peer) and path not in self.OPEN_PATHS:
@@ -1614,8 +1898,40 @@ class Server:
             except ValueError:
                 await self._json(w, {"ok": False, "message": "bad JSON"}, "400 Bad Request")
                 return
-            ok, msg = await self.midi.play(str(req.get("file", "")), bool(req.get("loop")))
+            # Score playback controls (NEW): the play request may carry initial
+            # speed / transpose / mute / solo / A-B / start position. play()
+            # validates them against the ACTUAL file's length before stopping
+            # whatever is currently playing — a bad request changes nothing.
+            params = {k: req[k] for k in ("speed", "transpose", "mute", "solo", "a", "b", "position_s") if k in req}
+            ok, msg = await self.midi.play(str(req.get("file", "")), bool(req.get("loop")), params or None)
             await self._json(w, {"ok": ok, "message": msg})
+            return
+        # ---- score playback controls (NEW): live seek + parameter changes ----
+        if path == "/api/midi/seek" and method == "POST":
+            try:
+                req = json.loads(body.decode("utf-8") or "{}")
+            except ValueError:
+                await self._json(w, {"ok": False, "message": "bad JSON"}, "400 Bad Request")
+                return
+            params, err = validate_midi_params({"position_s": req.get("position_s")}, self.midi.play_length)
+            if err:
+                await self._json(w, {"ok": False, "message": err}, "400 Bad Request")
+                return
+            ok, msg = self.midi.seek(params["position_s"])
+            await self._json(w, {"ok": ok, "message": msg})
+            return
+        if path == "/api/midi/params" and method == "POST":
+            try:
+                req = json.loads(body.decode("utf-8") or "{}")
+            except ValueError:
+                await self._json(w, {"ok": False, "message": "bad JSON"}, "400 Bad Request")
+                return
+            params, err = validate_midi_params(req, self.midi.play_length or None)
+            if err:
+                await self._json(w, {"ok": False, "message": err}, "400 Bad Request")
+                return
+            self.midi.set_params(params)
+            await self._json(w, {"ok": True, "status": self.midi.status()})
             return
         if path == "/api/midi/stop" and method == "POST":
             await self.midi.stop()
@@ -1751,8 +2067,8 @@ class Server:
             await self._json(w, await self.system.admin("stage-bundle", {}, 30.0))
             return
 
-        if path == "/api/update/apply" and method == "POST":
-            ok, msg = await self.system.update_apply()
+        if path in ("/api/update/apply", "/api/update/rollback") and method == "POST":
+            ok, msg = await self.system.update_apply(rollback=path.endswith("/rollback"))
             await self._json(w, {"ok": ok, "message": msg})
             return
 

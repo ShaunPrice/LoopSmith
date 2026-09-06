@@ -5,6 +5,12 @@
 
 extern "C" uint8_t external_psram_size;
 
+// name tables for the sync settings (indices = the LooperTiming enums)
+static const char *const SYNC_MODES[]  = {"off", "beat", "bar"};
+static const char *const SYNC_SRCS[]   = {"internal", "midi"};
+static const char *const SYNC_METS[]   = {"off", "rec", "on"};
+static const char *const SYNC_PHASES[] = {"idle", "countin", "armed", "recording", "closing"};
+
 void SerialProtocol::jsonEscapeInto(String &out, const String &s)
 {
     const unsigned int MAXLEN = 96;   // keeps #STATUS inside its buffer
@@ -59,6 +65,7 @@ bool SerialProtocol::receiveCounted(char **data, size_t len)
     size_t got = 0;
     uint32_t deadline = millis() + 5000;
     while (got < len && (int32_t)(deadline - millis()) > 0) {
+        pedal_->patch.pollTone();   // the test tone must stop on time even mid-transfer
         int avail = Serial.available();
         if (avail > 0) {
             size_t want = len - got;
@@ -125,26 +132,106 @@ void SerialProtocol::emitStatus()
     jsonEscapeInto(name, pedal_->presetName());
     jsonEscapeInto(title, pedal_->patch.patchTitle());
 
-    char buf[768];
+    char sync[176];
+    snprintf(sync, sizeof(sync),
+        "{\"mode\":\"%s\",\"src\":\"%s\",\"bpm\":%.1f,\"clk\":\"%s\",\"phase\":\"%s\","
+        "\"beat\":%u,\"countin\":%u,\"bars\":%u,\"met\":\"%s\"}",
+        SYNC_MODES[lp.syncMode() % 3], SYNC_SRCS[lp.syncSource() % 2],
+        lp.syncBpm(), pedal_->midiClock.stateName(),
+        SYNC_PHASES[lp.syncPhase() % 5], (unsigned)lp.syncBeat(),
+        (unsigned)lp.syncCountIn(), (unsigned)lp.syncBars(),
+        SYNC_METS[lp.syncMet() % 3]);
+
+    char buf[1280];
     snprintf(buf, sizeof(buf),
         "#STATUS {\"cpu\":%.1f,\"cpu_max\":%.1f,\"mem\":%d,\"mem_max\":%d,"
-        "\"peak_in\":%.3f,\"peak_out\":%.3f,"
+        "\"peak_in\":%.3f,\"peak_out\":%.3f,\"output_muted\":%s,"
         "\"loop\":{\"state\":\"%s\",\"len_s\":%.2f,\"pos_s\":%.2f,\"can_undo\":%s,\"seconds_max\":%.1f},"
+        "\"sync\":%s,"
         "\"preset\":{\"index\":%d,\"count\":%d,\"name\":\"%s\",\"title\":\"%s\"},"
-        "\"bypass\":%s,\"volume\":%.2f,\"source\":\"%s\",\"psram_mb\":%u,\"sd\":%s,\"flash\":%s}",
+        "\"bypass\":%s,\"volume\":%.2f,\"source\":\"%s\",\"psram_mb\":%u,\"sd\":%s,\"flash\":%s,"
+        "\"rev\":%lu,\"fp\":\"%s\",\"tone\":%s,\"midi\":{\"rx\":%lu,\"trig\":%lu,\"voices\":%d}}",
         AudioProcessorUsage(), AudioProcessorUsageMax(),
         AudioMemoryUsage(), AudioMemoryUsageMax(),
-        pedal_->patch.peakIn(), pedal_->patch.peakOut(),
+        pedal_->patch.peakIn(), pedal_->patch.peakOut(), pedal_->patch.outputMuted() ? "true" : "false",
         lp.stateName(), lp.lengthSeconds(), lp.positionSeconds(),
         lp.canUndo() ? "true" : "false", lp.maxSeconds(),
+        sync,
         pedal_->presetIndex, (int)pedal_->store.presets().size(),
         name.c_str(), title.c_str(),
         pedal_->patch.bypassed() ? "true" : "false",
         pedal_->patch.volume(), pedal_->patch.usbSource() ? "usb" : "line",
         (unsigned)external_psram_size,
         pedal_->store.sdPresent() ? "true" : "false",
-        pedal_->store.flashPresent() ? "true" : "false");
+        pedal_->store.flashPresent() ? "true" : "false",
+        (unsigned long)pedal_->patch.patchRev(),
+        pedal_->patch.patchFp().c_str(),
+        pedal_->patch.toneActive() ? "true" : "false",
+        (unsigned long)pedal_->midiRxNotes,
+        (unsigned long)pedal_->patch.noteTriggers(),
+        pedal_->patch.voiceCount());
     Serial.println(buf);
+}
+
+void SerialProtocol::emitSync()
+{
+    AudioEffectLooper &lp = pedal_->patch.looper;
+    Serial.printf("#SYNC {\"mode\":\"%s\",\"src\":\"%s\",\"bpm\":%.1f,\"countin\":%u,\"bars\":%u,"
+                  "\"met\":\"%s\",\"metvol\":%.2f,\"sig\":\"4/4\",\"clk\":\"%s\",\"phase\":\"%s\",\"beat\":%u}\n",
+                  SYNC_MODES[lp.syncMode() % 3], SYNC_SRCS[lp.syncSource() % 2],
+                  lp.syncBpm(), (unsigned)lp.syncCountIn(), (unsigned)lp.syncBars(),
+                  SYNC_METS[lp.syncMet() % 3], lp.syncMetVol(),
+                  pedal_->midiClock.stateName(), SYNC_PHASES[lp.syncPhase() % 5],
+                  (unsigned)lp.syncBeat());
+}
+
+void SerialProtocol::handleSync(int argc, char **argv)
+{
+    AudioEffectLooper &lp = pedal_->patch.looper;
+    if (argc < 2) { emitSync(); return; }
+    String sub = argv[1];
+    String val = argc > 2 ? argv[2] : "";
+    bool ok = true;
+    if (sub == "mode") {
+        if      (val == "off")  lp.syncSetMode(LooperTiming::MODE_OFF);
+        else if (val == "beat") lp.syncSetMode(LooperTiming::MODE_BEAT);
+        else if (val == "bar")  lp.syncSetMode(LooperTiming::MODE_BAR);
+        else ok = false;
+    } else if (sub == "source") {
+        if      (val == "internal" || val == "int") lp.syncSetSource(LooperTiming::SRC_INTERNAL);
+        else if (val == "midi")                     lp.syncSetSource(LooperTiming::SRC_MIDI);
+        else ok = false;
+    } else if (sub == "bpm") {
+        float b = val.toFloat();
+        if (b >= 30.0f && b <= 300.0f)
+            lp.syncSetSamplesPerBeat((uint32_t)(60.0f * AUDIO_SAMPLE_RATE_EXACT / b + 0.5f));
+        else ok = false;
+    } else if (sub == "countin") {
+        int n = val.toInt();
+        if ((n > 0 || val == "0") && n >= 0 && n <= 8) lp.syncSetCountIn((uint8_t)n);
+        else ok = false;
+    } else if (sub == "bars") {
+        int n = val.toInt();
+        if ((n > 0 || val == "0") && n >= 0 && n <= 64) lp.syncSetBars((uint16_t)n);
+        else ok = false;
+    } else if (sub == "met") {
+        if      (val == "off") lp.syncSetMet(LooperTiming::MET_OFF);
+        else if (val == "rec") lp.syncSetMet(LooperTiming::MET_REC);
+        else if (val == "on")  lp.syncSetMet(LooperTiming::MET_ON);
+        else ok = false;
+    } else if (sub == "metvol") {
+        float v = val.toFloat();
+        if ((v > 0.0f || val.startsWith("0")) && v >= 0.0f && v <= 1.0f) lp.syncSetMetVol(v);
+        else ok = false;
+    } else {
+        ok = false;
+    }
+    if (!ok) {
+        Serial.println("#ERR sync [mode off|beat|bar] [source internal|midi] [bpm 30-300] "
+                       "[countin 0-8] [bars 0-64] [met off|rec|on] [metvol 0-1]");
+        return;
+    }
+    emitSync();
 }
 
 void SerialProtocol::emitEventsIfChanged()
@@ -166,6 +253,11 @@ void SerialProtocol::emitEventsIfChanged()
         lastBypass_ = b;
         Serial.printf("#EVT {\"bypass\":%s}\n", b ? "true" : "false");
     }
+    int t = pedal_->patch.toneActive() ? 1 : 0;
+    if (t != lastTone_) {
+        lastTone_ = t;
+        Serial.printf("#EVT {\"tone\":%s}\n", t ? "true" : "false");
+    }
 }
 
 void SerialProtocol::handleLine(char *line)
@@ -182,6 +274,10 @@ void SerialProtocol::handleLine(char *line)
     }
     if (argc == 0) return;
     String cmd = argv[0];
+    // End diagnostics before operations that may block on media or transfers.
+    if (cmd == "get" || cmd == "put" || cmd == "apply" || cmd == "loop" ||
+        cmd == "load" || cmd == "next" || cmd == "prev" || cmd == "rm" || cmd == "list")
+        pedal_->patch.toneStop();
 
     if (cmd == "ping")   { emitPong(); return; }
     if (cmd == "status") { emitStatus(); return; }
@@ -201,7 +297,9 @@ void SerialProtocol::handleLine(char *line)
             if (!isdigit((unsigned char)arg[i])) { isNum = false; break; }
         bool ok = isNum ? pedal_->loadPresetByIndex(arg.toInt(), err)
                         : pedal_->loadPresetByName(arg, err);
-        if (ok) Serial.printf("#OK load %s\n", pedal_->presetName().c_str());
+        if (ok) Serial.printf("#OK load %s rev=%lu fp=%s\n", pedal_->presetName().c_str(),
+                              (unsigned long)pedal_->patch.patchRev(),
+                              pedal_->patch.patchFp().c_str());
         else    Serial.printf("#ERR %s\n", err.c_str());
         return;
     }
@@ -209,7 +307,9 @@ void SerialProtocol::handleLine(char *line)
     if (cmd == "next" || cmd == "prev") {
         String err;
         if (pedal_->stepPreset(cmd == "next" ? +1 : -1, err))
-            Serial.printf("#OK load %s\n", pedal_->presetName().c_str());
+            Serial.printf("#OK load %s rev=%lu fp=%s\n", pedal_->presetName().c_str(),
+                          (unsigned long)pedal_->patch.patchRev(),
+                          pedal_->patch.patchFp().c_str());
         else
             Serial.printf("#ERR %s\n", err.c_str());
         return;
@@ -260,9 +360,13 @@ void SerialProtocol::handleLine(char *line)
                 pedal_->presetIndex = -1;  // live patch, not a stored preset
                 if (warn.length()) {
                     warn.replace("\n", "; ");
-                    Serial.printf("#OK apply (warnings: %s)\n", warn.c_str());
+                    Serial.printf("#OK apply rev=%lu fp=%s (warnings: %s)\n",
+                                  (unsigned long)pedal_->patch.patchRev(),
+                                  pedal_->patch.patchFp().c_str(), warn.c_str());
                 } else {
-                    Serial.println("#OK apply");
+                    Serial.printf("#OK apply rev=%lu fp=%s\n",
+                                  (unsigned long)pedal_->patch.patchRev(),
+                                  pedal_->patch.patchFp().c_str());
                 }
             } else {
                 Serial.printf("#ERR %s\n", err.c_str());
@@ -367,6 +471,7 @@ void SerialProtocol::handleLine(char *line)
             bool hostGone = false;
             if (buf) {
                 while (left && !hostGone) {
+                    pedal_->patch.pollTone();          // keep the tone's auto-stop on time
                     int n = f.read(buf, left > 4096 ? 4096 : left);
                     if (n <= 0) break;                 // read error: pad below
                     hostGone = !writeAll(buf, n, 8000);
@@ -395,6 +500,7 @@ void SerialProtocol::handleLine(char *line)
             long got = 0; bool writeFail = false, timedOut = false;
             uint32_t last = millis();
             while (got < len) {
+                pedal_->patch.pollTone();              // keep the tone's auto-stop on time
                 int avail = Serial.available();
                 if (avail <= 0) {
                     if (millis() - last > 10000) { timedOut = true; break; }   // 10 s idle timeout
@@ -441,6 +547,28 @@ void SerialProtocol::handleLine(char *line)
         return;
     }
 
+    if (cmd == "tone") {
+        // tone [ms] [freq] [level] — quiet diagnostic sine into the analogue
+        // output stage only (the running patch, loop and USB audio are all
+        // untouched); stops by itself. `tone off` stops it early.
+        // Clamped: 100–5000 ms, 40–5000 Hz, level ≤ 0.05.
+        String a = argc > 1 ? argv[1] : "";
+        if (a == "off" || a == "stop") {
+            pedal_->patch.toneStop();
+            Serial.println("#OK tone off");
+            return;
+        }
+        long  ms    = a.length() ? String(argv[1]).toInt() : TONE_MS_DEFAULT;
+        float freq  = argc > 2 ? String(argv[2]).toFloat() : TONE_FREQ_DEFAULT;
+        float level = argc > 3 ? String(argv[3]).toFloat() : TONE_LEVEL_DEFAULT;
+        if (a.length() && ms <= 0) { Serial.println("#ERR tone [ms] [freq] [level] | tone off"); return; }
+        if (ms < TONE_MS_MIN) ms = TONE_MS_MIN;
+        if (ms > TONE_MS_MAX) ms = TONE_MS_MAX;
+        pedal_->patch.toneStart((uint32_t)ms, freq, level);
+        Serial.printf("#OK tone %ld\n", ms);
+        return;
+    }
+
     if (cmd == "source") {
         String a = argc > 1 ? argv[1] : "";
         if (a == "usb")       pedal_->patch.setInputSource(true);
@@ -450,14 +578,26 @@ void SerialProtocol::handleLine(char *line)
         return;
     }
 
+    if (cmd == "sync") {
+        handleSync(argc, argv);
+        return;
+    }
+
+    if (cmd == "panic" || cmd == "resume") {
+        pedal_->patch.setOutputMuted(cmd == "panic");
+        if (cmd == "panic") { pedal_->patch.allNotesOff(); pedal_->patch.looper.halt(); }
+        Serial.println("#OK output");
+        return;
+    }
     if (cmd == "looper") {
         String a = argc > 1 ? argv[1] : "";
         AudioEffectLooper &lp = pedal_->patch.looper;
         if      (a == "tap")   lp.tapLoop();
         else if (a == "stop")  lp.tapStop();
+        else if (a == "halt")  lp.halt();
         else if (a == "undo")  lp.undo();
         else if (a == "clear") lp.clearLoop();
-        else { Serial.println("#ERR looper tap|stop|undo|clear"); return; }
+        else { Serial.println("#ERR looper tap|stop|halt|undo|clear"); return; }
         Serial.println("#OK looper");
         return;
     }
@@ -469,8 +609,11 @@ void SerialProtocol::handleLine(char *line)
         Serial.println("  put <name> <len> | apply <len> | rm <name>");
         Serial.println("  bypass on/off/toggle | vol <0..1> | source line|usb");
         Serial.println("  looper tap|stop|undo|clear | note on <n> <vel> [ch] | note off <n> [ch]");
+        Serial.println("  sync [mode off|beat|bar] [source internal|midi] [bpm <30-300>]");
+        Serial.println("       [countin <0-8>] [bars <0-64>] [met off|rec|on] [metvol <0-1>]");
         Serial.println("  switches | switch <1-6> <tap> <hold> [note]");
         Serial.println("  loops | loop save|load|rm|get|put <name.wav> [len]");
+        Serial.println("  tone [ms] [freq] [level] | tone off   (quiet self-stopping test tone, analogue out only)");
         return;
     }
 

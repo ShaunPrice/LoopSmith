@@ -104,6 +104,8 @@ public:
         case AudioEffectLooper::OVERDUBBING: rec = fast; play = true; break;
         case AudioEffectLooper::PLAYING:     play = true; break;
         case AudioEffectLooper::STOPPED:     play = hasLoop && slow; break;
+        case AudioEffectLooper::ARMED:       rec = slow; break;   // waiting for the beat
+        case AudioEffectLooper::COUNT_IN:    rec = fast; break;   // count-in running
         default: break;
         }
         // Heartbeat: with no loop the panel would be dark, and the Teensy's own LED is

@@ -13,7 +13,9 @@ public:
 
 private:
     void handleLine(char *line);
+    void handleSync(int argc, char **argv);
     void emitStatus();
+    void emitSync();
     void emitPong();
     void emitPresets();
     void emitEventsIfChanged();
@@ -31,4 +33,5 @@ private:
     String  lastLoopState_;
     String  lastPreset_;
     int     lastBypass_ = -1;
+    int     lastTone_ = -1;     // so the auto-stopped test tone announces itself
 };
