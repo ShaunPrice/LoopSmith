@@ -986,6 +986,11 @@ class MidiPlayerLogic:
         if transpose is not None:
             self.transpose = int(transpose)
         out = []
+        # Released keys may still sound under sustain even with no held keys.
+        for ch in sorted(self.sustain):
+            if not self._audible(ch):
+                out.append(bytes((0xB0 | ch, 64, 0)))
+                self.sustain.discard(ch)
         for (ch, src), sent in list(self.held.items()):
             if not self._audible(ch):
                 if ch in self.sustain:

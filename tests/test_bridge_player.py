@@ -211,6 +211,15 @@ class TestPlayerLogic(unittest.TestCase):
         self.assertEqual(offs[1], bytes((0x80, 62, 0)))
         self.assertNotIn(0, lg.sustain)
 
+    def test_mute_releases_sustain_with_no_held_keys(self):
+        lg = self.logic(build_smf([
+            (0, 0xB0, 64, 127), (0, 0x90, 60, 90),
+            (240, 0x80, 60, 0), (960, 0xB0, 64, 0),
+        ]))
+        lg.advance(0.3)
+        self.assertEqual(lg.held, {})
+        self.assertEqual(lg.set_filters(mute=[1]), [bytes((0xB0, 64, 0))])
+
     def test_seek_restores_sustain_state(self):
         lg = self.logic(build_smf([
             (0, 0xB0, 64, 127),

@@ -512,3 +512,12 @@ test('scoreCtlParams() is the transport-bar hook and mirrors scoreCtl', () => {
   const p = E.scoreCtlParams();
   assert.deepEqual(JSON.parse(JSON.stringify(p)), { speed: 2, transpose: -3, mute: [4], solo: [], a: 1, b: 2 });
 });
+
+test('mute releases sustained sound after all keys have been released', () => {
+  const smf = buildSmf([[0, 0xb0, 64, 127], [0, 0x90, 60, 90],
+    [240, 0x80, 60, 0], [960, 0xb0, 64, 0]]);
+  const core = E.createPlayerCore(evAt(E.parseSmf(smf.buffer)), {});
+  core.advance(0.3);
+  assert.equal(core.held.size, 0);
+  assert.deepEqual(core.setFilters({mute:[1]}), [[0xb0,64,0]]);
+});

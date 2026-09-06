@@ -5615,6 +5615,10 @@ function createPlayerCore(events, opts) {
       if (f.solo) core.solo = new Set(f.solo);
       if (f.transpose !== undefined) core.transpose = f.transpose | 0;
       const out = [];
+      // Sustain can hold sound after every physical key has been released.
+      for (const ch of core.sustain) {
+        if (!core.audible(ch)) { out.push([0xB0 | ch, 64, 0]); core.sustain.delete(ch); }
+      }
       for (const [key, sent] of core.held) {
         const ch = +key.split('/')[0];
         if (!core.audible(ch)) {
