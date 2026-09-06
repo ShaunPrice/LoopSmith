@@ -40,6 +40,14 @@ It is designed to be pleasant for humans *and* trivially parseable by the Studio
 | `loop put <name> <len>` | `#SEND` → send `<len>` bytes → `#OK loop put` | upload a WAV to `/loops` (streamed to the card, ≤ 8 MB, 10 s idle timeout; a failed upload leaves the previous file intact); follow with `loop load` to hear it. Names may omit `.wav`. |
 | `tone [ms] [freq] [level]` | `#OK tone 1000` | **firmware 2.2.2+** — a quiet diagnostic sine, mixed in *after* the preset graph and the USB tap: the running patch, the loop and USB recordings are untouched, and the tone reaches the **analogue headphone/line out only**. Stops by itself (expiry is polled from the main loop *and* inside the blocking counted-transfer loops, so a long `put`/`get` cannot delay it); clamps: 100–5000 ms (default 1000), 40–5000 Hz (default 440), level ≤ 0.05 (default 0.02 — a diagnostic beep, not a reference tone). It shows on `peak_out`, which proves **digital** signal reaches the output stage — the analogue path (codec, jack, cable, speaker) still cannot be verified in software. |
 | `tone off` | `#OK tone off` | stop the test tone early |
+| `sync` | `#SYNC {…}` | current musical-sync settings and state — see below and docs/LOOPER_SYNC.md |
+| `sync mode off\|beat\|bar` | `#SYNC {…}` | quantise recording to nothing (legacy, the default), the next beat, or the next bar |
+| `sync source internal\|midi` | `#SYNC {…}` | tempo source: the configured BPM, or incoming USB MIDI clock (24 PPQN) |
+| `sync bpm <30–300>` | `#SYNC {…}` | internal tempo |
+| `sync countin <0–8>` | `#SYNC {…}` | metronome count-in bars before recording starts (0 = off) |
+| `sync bars <0–64>` | `#SYNC {…}` | fixed recording length in bars — the loop closes itself (0 = free, tap to close) |
+| `sync met off\|rec\|on` | `#SYNC {…}` | metronome click: never / while recording / whenever the grid runs (count-ins always click) |
+| `sync metvol <0–1>` | `#SYNC {…}` | click level |
 | `help` | human text | command summary |
 
 Unknown commands answer `#ERR unknown command`.
@@ -79,6 +87,8 @@ a `note` argument makes the group respond to that note only (drum pads).
   "mem": 14, "mem_max": 22,
   "peak_in": 0.42, "peak_out": 0.61,
   "loop": {"state": "playing", "len_s": 12.4, "pos_s": 3.1, "can_undo": true, "seconds_max": 95.0},
+  "sync": {"mode": "bar", "src": "internal", "bpm": 120.0, "clk": "idle",
+           "phase": "idle", "beat": 1, "countin": 1, "bars": 4, "met": "rec"},
   "preset": {"index": 1, "count": 5, "name": "02_ambient.txt", "title": "Ambient Swell"},
   "bypass": false, "volume": 0.70, "source": "line",
   "psram_mb": 16, "sd": true, "flash": true,
@@ -86,7 +96,25 @@ a `note` argument makes the group respond to that note only (drum pads).
 }
 ```
 
-`loop.state` ∈ `empty | recording | playing | overdubbing | stopped`.
+`loop.state` ∈ `empty | recording | playing | overdubbing | stopped | armed | countin`
+(`armed` = a synced recording is waiting for its beat/bar; `countin` = the metronome
+count-in is running; STOP cancels either without touching anything).
+
+## `#SYNC` payload
+
+`sync` and every `sync …` setter answer with the full state:
+
+```json
+#SYNC {"mode": "bar", "src": "internal", "bpm": 120.0, "countin": 1, "bars": 4,
+       "met": "rec", "metvol": 0.60, "sig": "4/4", "clk": "idle", "phase": "idle", "beat": 1}
+```
+
+`bpm` is the effective tempo (the measured one when following MIDI clock).
+`clk` ∈ `idle | running | stopped | lost` — the MIDI clock follower's state.
+`phase` ∈ `idle | countin | armed | recording | closing` — what the timing engine is doing;
+`beat` is the 1-based beat inside the current bar. The meter is fixed at 4/4 for now, and the
+settings are session-only (not persisted). Musical behaviour, timing accuracy and limits are
+documented in [LOOPER_SYNC.md](LOOPER_SYNC.md).
 
 The last line (`rev`, `fp`, `tone`, `midi`) is **firmware 2.2.2+**; older firmware simply
 omits it and clients must treat those facts as unknown rather than guessing.
